@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: grabora
+    env: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: CARD_NUMBER
+        sync: false
+      - key: CARD_HOLDER
+        sync: false
+      - key: BOT_API_URL
+        value: https://api.telegram.org
+      - key: DATABASE_PATH
+        value: ./grabora.db
+      - key: TEMP_DIR
+        value: ./tmp/downloads
+      - key: LOG_LEVEL
+        value: INFO

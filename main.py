@@ -28,6 +28,7 @@ from config import (
 )
 from database.db import close_db, init_db
 from payments.stars import init_stars, setup_stars
+from web_server import start_web_server
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,13 @@ async def main() -> None:
     scheduler.add_job(expiry_reminder_job, "interval", hours=24)
     scheduler.start()
 
+    # Render free-tier Web Service: bind $PORT and serve /health.
+    web_runner = None
+    try:
+        web_runner = await start_web_server()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Web server failed to start: %s", exc)
+
     stop_event = asyncio.Event()
 
     def _signal_handler() -> None:
@@ -185,6 +193,9 @@ async def main() -> None:
         await bot_task
     except asyncio.CancelledError:
         pass
+
+    if web_runner is not None:
+        await web_runner.cleanup()
 
     scheduler.shutdown(wait=False)
     await bot.session.close()

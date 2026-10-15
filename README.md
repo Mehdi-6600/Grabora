@@ -232,6 +232,36 @@ EnvironmentFile=/opt/grabora/.env
 WantedBy=multi-user.target
 ```
 
+## Deploy on Render (free tier)
+
+Grabora can run on Render's free Web Service plan using the included Dockerfile and `.render.yaml`.
+
+### One-click deploy via Blueprint
+1. Push the repo to GitHub.
+2. In Render dashboard: **New +** → **Blueprint** → select this repo.
+3. Render reads `.render.yaml` and creates the service automatically.
+4. Fill in required env vars (`BOT_TOKEN`, `ADMIN_IDS`, `CARD_NUMBER`, `CARD_HOLDER`).
+5. Deploy.
+
+### Manual deploy
+1. **New +** → **Web Service** → select this repo.
+2. Render auto-detects the Dockerfile.
+3. Plan: **Free**.
+4. Add the required env vars.
+5. Deploy.
+
+### Keep it awake (free tier)
+Free Web Services sleep after 15 minutes of inactivity. Add the service URL to UptimeRobot (https://uptimerobot.com) with a 5-minute HTTP ping to:
+
+```
+https://<your-service>.onrender.com/health
+```
+
+### Free-tier limitations
+- **512 MB RAM** — enough for the bot, but 1080p downloads may OOM.
+- **Sleeps after 15 min idle**, cold start ~30 s (UptimeRobot prevents this).
+- **Ephemeral filesystem**: `grabora.db` and `tmp/` are wiped on restart. For persistence, attach a Render persistent disk (paid).
+
 ## Testing
 
 ```bash
