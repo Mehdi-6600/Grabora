@@ -1,0 +1,47 @@
+# Changelog
+
+## [0.2.0]
+
+### Changed
+- **Format gating reworked**: 720p and 1080p now require an active subscription (previously free users could request them); free users keep 144p–480p, and 1440p (2K) still requires the 2K addon.
+- **File-size gating**: free users are limited to 500 MB per file (`FREE_MAX_FILE_SIZE_MB`), subscribers to 1900 MB (`MAX_FILE_SIZE_MB`). Enforced before the file is sent, using a pre-download metadata size estimate plus a post-download check on the real file.
+- **Card-to-card (IRR) payment replaced Zarinpal**: users pay to a card and send a tracking number; an admin approves manually. Package prices come from a single `PACKAGE_PRICES_IRR` / `PACKAGE_PRICES_STARS` source.
+- Card details and amounts are configurable (`CARD_NUMBER`, `CARD_HOLDER`, seeded into a new `settings` table and editable at runtime with `/card`).
+- Access decisions now return an `AccessResult` enum (`bot/middlewares/access.py`) instead of a boolean, shared by the middleware and the download handler.
+
+### Added
+- Card-to-card flow: package picker → `💳 پرداخت با کارت` → card instructions → tracking number → admin approval (`bot/handlers/card_payment.py`).
+- Admin commands: `/pending`, `/card`, `/card <number> | <holder>`, `/reject <payment_id>`.
+- Admin approval keyboard with four package buttons where only the chosen package is active (the rest are 🔒 / `noop`).
+- Duplicate-tracking-number detection: warns the admin and refuses to auto-activate.
+- `payments.tracking_number` column and a partial unique index preventing the same tracking number from being verified twice.
+- `settings` table (`key TEXT PRIMARY KEY`, `value TEXT NOT NULL`) with safe `INSERT OR IGNORE` seeding.
+- Safe startup migrations for `payments.tracking_number`, `settings`, and `users.reminder_sent_for_expiry`.
+- New messages: `UPGRADE_FOR_QUALITY`, `UPGRADE_FOR_SIZE`, `CARD_PAYMENT_INSTRUCTIONS`, `TRACKING_RECEIVED`, `TRACKING_INVALID`, `PENDING_EXISTS`, `ADMIN_NEW_PAYMENT`, `ADMIN_DUPLICATE_TRACKING_WARNING`, `PAYMENT_REJECTED`, `CARD_CURRENT`, `CARD_UPDATED`, `TIER_LABELS`.
+- Shared `activate_subscription()` used by both the Stars and card paths (idempotent).
+- Test suite expanded from 7 to 26 tests (access/size gating, quality gating, card-to-card approval flow).
+
+### Removed
+- Zarinpal payment provider (`payments/zarinpal.py`) and the FastAPI/uvicorn callback server (`payments/callback_server.py`).
+- `fastapi`, `uvicorn[standard]`, and `irgateway` dependencies; no HTTPS callback endpoint or merchant ID is needed to run the bot.
+- Legacy `TIER_PRICES_IRR` / `TIER_PRICES_STARS` dicts, the `ADDON_2K_IRR` / `ADDON_2K_STARS` duplicates, and the unused `_get_bool()` config helper.
+
+### Fixed
+- **Stars payments crashed with `TypeError`**: `payments/stars.py` passed `transaction_id=` to `create_payment()`, which had no such parameter. The parameter is now accepted and persisted.
+- **`update_payment_status()` wiped `transaction_id`**: the column was always overwritten (with `NULL`) when activation was called without a transaction ID, breaking Stars replay idempotency. It now uses `COALESCE` so omitted values leave existing data intact.
+- The Stars notification hook in `main.py` sent the raw `PAYMENT_SUCCESS` template without formatting; it was dead code and has been removed (notifications are sent, formatted, from `_handle_stars_payment`).
+
+## [0.1.0] — MVP
+
+### Added
+- Async Telegram bot (Aiogram 3.x) with yt-dlp download engine and ffmpeg audio extraction.
+- Subscription tiers (free/monthly/quarterly/yearly) + 2K addon.
+- Quality gating with locked formats and upgrade prompts.
+- Telegram Stars payments (neonpay) and Zarinpal payments (irgateway) — *both gateways; Zarinpal removed in 0.2.0*.
+- FastAPI callback server for Zarinpal verification — *removed in 0.2.0*.
+- SQLite database with PostgreSQL-ready schema.
+- APScheduler jobs: temp cleanup, daily counter reset, expiry checks & reminders.
+- Admin commands: stats, broadcast, ban/unban, give/revoke, payments.
+- Throttling and access middlewares.
+- Rotating file logging (5 MB × 3).
+- Test suite (7 tests).
