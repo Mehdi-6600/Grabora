@@ -58,6 +58,11 @@ FREE_MAX_FILE_SIZE_MB: Final[int] = 500
 CARD_NUMBER: Final[str] = _get_str("CARD_NUMBER")
 CARD_HOLDER: Final[str] = _get_str("CARD_HOLDER")
 
+# YouTube cookies (needed on cloud/datacenter IPs such as Render, which
+# YouTube treats as bots). Provide the Netscape cookies.txt as base64.
+YOUTUBE_COOKIES_B64: Final[str] = _get_str("YOUTUBE_COOKIES_B64")
+YOUTUBE_COOKIES_FILE: Final[str] = _get_str("YOUTUBE_COOKIES_FILE", "/tmp/cookies.txt")
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------

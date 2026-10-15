@@ -79,6 +79,12 @@ async def main() -> None:
     from config import CARD_NUMBER, CARD_HOLDER
     await seed_settings(CARD_NUMBER, CARD_HOLDER)
 
+    # Resolve the YouTube cookies file now so the log tells us immediately
+    # whether YouTube downloads can succeed from this host.
+    from downloader.ytdlp_wrapper import prepare_youtube_cookies
+
+    prepare_youtube_cookies()
+
     from aiogram import Bot, Dispatcher
 
     session = AiohttpSession(api=TelegramAPIServer.from_base(BOT_API_URL))

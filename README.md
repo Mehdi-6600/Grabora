@@ -178,12 +178,56 @@ Set `BOT_API_URL=http://localhost:8081` in `.env` and run a local Bot API server
 | `MAX_FILE_SIZE_MB` | `1900` | Max file size for subscribers (free users are capped at 500 MB) |
 | `CARD_NUMBER` | — | Card number shown to users (seeded into `settings`, editable via `/card`) |
 | `CARD_HOLDER` | — | Card holder name shown to users (editable via `/card`) |
+| `YOUTUBE_COOKIES_B64` | — | Base64-encoded `cookies.txt` for YouTube (required on cloud/datacenter IPs such as Render) |
+| `YOUTUBE_COOKIES_FILE` | `/tmp/cookies.txt` | Where the decoded cookies file is written at startup |
 | `LOG_LEVEL` | `INFO` | Logging level |
 | `LOG_FILE` | `logs/grabora.log` | Log file path |
 | `CLEANUP_INTERVAL_HOURS` | `1` | Temp cleanup interval |
 | `TEMP_FILE_MAX_AGE_HOURS` | `1` | Temp file max age |
 
 `CARD_NUMBER` / `CARD_HOLDER` are only the initial values: they are seeded into the `settings` table on first start and can be changed at runtime with `/card` without a restart (existing values are never overwritten on restart).
+
+## YouTube cookies (cloud hosting)
+
+YouTube blocks requests from datacenter IPs — Render, Railway, Fly.io and most VPS
+providers — with `Sign in to confirm you're not a bot`. The fix is to give `yt-dlp`
+the cookies of a signed-in YouTube account.
+
+### Generating the cookies value
+
+1. In a browser where you are logged into YouTube, install a `cookies.txt` exporter
+   extension (for example *Get cookies.txt LOCALLY* for Chrome/Firefox).
+2. Open `https://www.youtube.com` while signed in and export the cookies in
+   **Netscape** format as `cookies.txt`.
+3. Base64-encode the file as a single line:
+
+   ```bash
+   base64 -w0 cookies.txt          # Linux
+   base64 -i cookies.txt           # macOS
+   ```
+
+4. Put the resulting string into `YOUTUBE_COOKIES_B64` in `.env` (or in the Render
+   dashboard under *Environment*).
+
+At startup the bot decodes this value to `YOUTUBE_COOKIES_FILE` (default
+`/tmp/cookies.txt`, written with `0600` permissions) and passes it to `yt-dlp` as
+`cookiefile`. The cookie value is never logged.
+
+> **Treat the value as a secret.** It grants access to the YouTube account it came
+> from. Use a throwaway account — YouTube can invalidate the session if you tick
+> "logout of all devices" or change the password. Cookies expire after a few weeks
+> to months; if downloads start failing again, export a fresh `cookies.txt`.
+
+### Without cookies
+
+If `YOUTUBE_COOKIES_B64` is unset the bot still starts and logs
+`YOUTUBE_COOKIES_B64 not set, YouTube may block downloads`. Each download then
+walks through a fallback ladder of yt-dlp player clients
+(`web_creator`/`android_vr`, then `tv_simply`/`ios`, then `web_embedded`/`mweb`/`tv`)
+and, if YouTube still answers with a bot check, retries with the next client set
+before giving up. When cookies *are* configured the yt-dlp defaults are tried first
+(they expose the most formats) and the client ladder is used only as a fallback.
+Client names the installed yt-dlp build does not support are skipped automatically.
 
 ## Payments
 
@@ -261,6 +305,7 @@ https://<your-service>.onrender.com/health
 - **512 MB RAM** — enough for the bot, but 1080p downloads may OOM.
 - **Sleeps after 15 min idle**, cold start ~30 s (UptimeRobot prevents this).
 - **Ephemeral filesystem**: `grabora.db` and `tmp/` are wiped on restart. For persistence, attach a Render persistent disk (paid).
+- **YouTube blocks Render's datacenter IPs** (`Sign in to confirm you're not a bot`). Set `YOUTUBE_COOKIES_B64` — see [YouTube cookies (cloud hosting)](#youtube-cookies-cloud-hosting). Note that a persistent disk is not needed for the cookies file: it is re-created from the environment variable on every start.
 
 ## Testing
 

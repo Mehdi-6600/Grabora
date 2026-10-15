@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **YouTube cookie support** (`YOUTUBE_COOKIES_B64`): a base64-encoded `cookies.txt` is decoded at startup to `YOUTUBE_COOKIES_FILE` (default `/tmp/cookies.txt`, mode `0600`) and passed to `yt-dlp` as `cookiefile`. Required on cloud/datacenter IPs such as Render, where YouTube answers `Sign in to confirm you're not a bot`. If unset, the bot still starts and logs a warning.
+- **Player-client fallback ladder**: when YouTube demands a sign-in, downloads retry through alternative `yt-dlp` player clients (`web_creator`/`android_vr` → `tv_simply`/`ios` → `web_embedded`/`mweb`/`tv`). Client names unsupported by the installed `yt-dlp` build are filtered out automatically (e.g. `tv_embedded`, removed in recent versions), and the client list is introspected defensively with a static fallback.
+- README section "YouTube cookies (cloud hosting)" with cookie export/base64 instructions and guidance on expiry and secret handling.
+
+### Fixed
+- Downloads no longer fail permanently on YouTube's bot check: bot-check errors are detected (including wrapped `DownloadError` causes) and retried with the next client set instead of aborting on the first attempt.
+
 ## [0.2.0]
 
 ### Changed
