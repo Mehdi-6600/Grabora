@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
-from aiogram.types import Message, TelegramObject
+from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from bot.utils.messages import BANNED
 from config import (
@@ -204,15 +204,30 @@ class AccessMiddleware(BaseMiddleware):
         data["db_user"] = db_user
 
         if db_user.is_banned:
+            # Dropping an update here means no reply at all: say so in the log,
+            # and make sure the user is told (a silent drop looks like an outage).
+            logger.warning(
+                "Access denied: user %s is banned — update dropped (%s)",
+                db_user.user_id,
+                type(event).__name__,
+            )
             if isinstance(event, Message):
                 await event.answer(BANNED)
+            elif isinstance(event, CallbackQuery):
+                await event.answer(BANNED, show_alert=True)
             return None
 
+        logger.debug("Access granted: user %s (%s)", db_user.user_id, type(event).__name__)
         return await handler(event, data)
 
 
 class AdminMiddleware(BaseMiddleware):
-    """Restrict handler to admins (silent reject)."""
+    """Restrict a router to admins.
+
+    Non-admins are rejected without an answer (the command routers stay quiet so
+    ordinary users do not learn the admin surface exists), but never without a
+    log line: a silent rejection is indistinguishable from a dead bot.
+    """
 
     async def __call__(
         self,
@@ -222,5 +237,11 @@ class AdminMiddleware(BaseMiddleware):
     ) -> Any:
         user = data.get("event_from_user")
         if user is None or user.id not in ADMIN_IDS:
+            logger.info(
+                "Admin-only handler skipped: user %s is not an admin (%s)",
+                getattr(user, "id", None),
+                type(event).__name__,
+            )
             return None
+        logger.debug("Admin handler allowed for %s", user.id)
         return await handler(event, data)

@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Chat, Message, Update
 from aiogram.types import User as TgUser
 
@@ -34,8 +33,6 @@ from bot.keyboards.reply import (
     admin_menu,
     main_menu,
 )
-from bot.middlewares.access import AccessMiddleware
-from bot.middlewares.throttling import ThrottlingMiddleware
 from bot.utils.messages import (
     ADMIN_ONLY,
     ADMIN_PANEL_EXIT,
@@ -422,14 +419,10 @@ class RecordingSession(BaseSession):
 
 @pytest.fixture(scope="session")
 def panel_dispatcher() -> Dispatcher:
-    """Dispatcher with just the admin panel — its own routers, so it can include
-    the module-level router without clashing with the other e2e test."""
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.message.middleware(ThrottlingMiddleware())
-    dp.message.middleware(AccessMiddleware())
-    admin_panel_router.message.middleware(admin_panel.AdminPanelMiddleware())
-    dp.include_router(admin_panel_router)
-    return dp
+    """The production dispatcher: the panel is part of the real chain."""
+    from main import build_dispatcher
+
+    return build_dispatcher()
 
 
 @pytest.fixture
@@ -476,9 +469,15 @@ async def test_admin_opens_the_panel_through_the_dispatcher(
 async def test_every_button_tap_is_handled_by_the_dispatcher(
     db, admin_ids, no_throttle, panel_dispatcher
 ):
+    from bot.utils.messages import FALLBACK_TEXT
+
     for index, text in enumerate(ADMIN_BUTTON_TEXTS, start=10):
         session = await tap(panel_dispatcher, text, ADMIN_ID, update_id=index)
         assert session.texts, f"tapping {text!r} produced no reply"
+        # The panel router must have handled it, not the catch-all fallback.
+        assert FALLBACK_TEXT not in session.texts, (
+            f"{text!r} fell through to the fallback handler"
+        )
 
 
 @pytest.mark.asyncio
@@ -501,10 +500,19 @@ async def test_non_admin_cannot_open_the_panel(
 
 
 @pytest.mark.asyncio
-async def test_user_menu_button_is_ignored_by_the_panel(
+async def test_user_menu_button_is_handled_by_the_user_router_not_the_panel(
     db, admin_ids, no_throttle, panel_dispatcher
 ):
-    """The panel must not react to the regular user keyboard."""
+    """The panel must not react to the regular user keyboard.
+
+    With the full production chain the user router answers it (which is the
+    point), but the reply must be the account summary and not a panel message.
+    """
+    from bot.utils.messages import ADMIN_ONLY, FALLBACK_TEXT
+
     session = await tap(panel_dispatcher, BTN_ACCOUNT, ADMIN_ID)
 
-    assert session.texts == []
+    assert session.texts, "a user-menu button must still be answered by the user router"
+    assert session.texts[0] != FALLBACK_TEXT
+    assert ADMIN_ONLY not in session.texts
+    assert str(ADMIN_ID) in session.texts[0]  # the account summary

@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Fixed
+- **CRITICAL: `/start` (and every other message) could be silently swallowed, making the bot look dead.**
+  `ThrottlingMiddleware` runs on `dp.message`, i.e. it wraps the whole router chain (`Dispatcher.propagate_event`
+  → `_propagate_event` → sub-routers), and it returned `None` for any message sent within `THROTTLE_SECONDS`
+  (2s) of the same user's previous message. In aiogram 3 a middleware returning `None` makes the dispatcher log
+  `Update id=N is handled` and stop — no router runs, no reply is sent, no error is written. Three `/start` taps
+  in a row could therefore produce **zero** replies. Commands and reply-keyboard buttons (pure navigation) are
+  no longer throttled, and a drop is now logged at `WARNING` with the user, the elapsed time and the text
+  preview. Free text and URLs keep their anti-spam throttle.
+- **Polling can no longer die silently**: `log_polling_exit()` reports why `start_polling` returned, with an
+  explicit hint for `TelegramConflictError` ("another process is polling the same BOT_TOKEN"), instead of the
+  service restarting in a loop without a reason in the log.
+
+### Added
+- **`/ping`** → answers `pong` from a middleware registered *before* all others (`bot/middlewares/ping.py`), so it
+  works even when throttling, the access middleware, the database or any router is broken. It is the
+  "is the bot alive?" probe: `/ping` replies while `/start` does not ⇒ the process and Telegram connection are
+  fine and the message is being dropped further down the chain.
+- **Fallback handlers** (`bot/handlers/fallback.py`, included last): any message or callback no router claims is
+  logged at `WARNING` with user, chat, content type and text preview, and answered — silence is never the
+  outcome.
+- Middleware diagnostics: `ThrottlingMiddleware` (pass/drop with reasons), `AccessMiddleware` (granted/denied and
+  a `BANNED` answer for callbacks too), `AdminMiddleware`/`AdminPanelMiddleware` (reject/pass) all log what they
+  do with an update; enable `LOG_LEVEL=DEBUG` for the per-update lines.
+- `main.build_dispatcher()`: the middleware/router wiring now lives in one function used by both `main()` and the
+  tests, which log the wiring at startup. The dispatcher/middleware/router tests in `tests/` were switched to
+  it, so a wiring regression fails the suite instead of reaching production.
+- `tests/test_bot_reachability.py`: `/start` from a regular non-admin user must reply, three rapid `/start` taps
+  must all reply, `/ping` must reply even when the access middleware's DB call explodes, unmatched messages must
+  be logged and answered, and polling deaths must be reported.
+
 ### Added
 - **Independent admin panel** (`/admin`, alias `/panel`): a dedicated reply keyboard (`📊 آمار`,
   `💳 پرداخت‌های در انتظار`, `💰 قیمت‌ها`, `💳 شماره کارت`, `📢 پیام همگانی`, `🔧 تست اطلاع‌رسانی`,

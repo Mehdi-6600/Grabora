@@ -15,6 +15,7 @@
 - **Subscription tiers**: free / monthly / quarterly / yearly + optional 2K addon.
 - **Daily download limits** with automatic daily reset.
 - **Payments**: Telegram Stars (via `neonpay`, automatic activation) and card-to-card in IRR (manual admin approval).
+- **Health check**: `/ping` → `pong`, answered before every other middleware (see "Bot looks dead?" below).
 - **Admin panel**: `/admin` (alias `/panel`) opens a dedicated reply keyboard — stats, pending payments, prices, card details, broadcast and a notification self-test — so no command has to be remembered.
 - **Admin tools**: `/stats`, `/broadcast`, `/ban`, `/unban`, `/give`, `/revoke`, `/payments`, `/pending`, `/card`, `/prices`, `/reject`, `/test_alert`.
 - **Queue & throttling**: global concurrency 3, per-user 1, 1 msg/2s throttle.
@@ -355,6 +356,26 @@ https://<your-service>.onrender.com/health
 ```bash
 .venv/bin/pytest -q
 ```
+
+## Bot looks dead? Diagnose in this order
+
+1. **`/ping`** → must answer `pong`. It is handled by a middleware registered before every other one, so it
+   works even if the database, throttling or the access middleware is broken.
+   * `pong` arrives, `/start` does not → the process is alive and can send messages; the silence comes from the
+     middleware chain. Search the log for that `update id` (see 3).
+   * no `pong` → the bot cannot reach Telegram at all: check `BOT_TOKEN`, and check for
+     `TelegramConflictError` (another instance or a webhook polling the same token — only one may).
+2. **Log level** — set `LOG_LEVEL=DEBUG` to see a line for every middleware decision, e.g.
+   `Access granted: user 123 (Message)`, `Admin-only handler skipped: user 123 is not an admin (Message)`.
+3. **Dropped update** — `Update id=N is handled` with **no** reply means a middleware consumed the update.
+   `ThrottlingMiddleware` logs `Throttled: user … — the update is dropped and no handler runs` at `WARNING`;
+   the access middleware logs `Access denied: user … is banned` and tells the user.
+4. **Unmatched update** — anything no router claims is logged as `UNMATCHED message from user=… content_type=…`
+   and answered with a short hint, so a user never sees silence.
+5. **Polling died?** — `log_polling_exit()` writes the exact cause at `ERROR` when `start_polling` returns.
+
+Commands and reply-keyboard buttons are never throttled (they are the user's only way back); the 2-second
+throttle applies to free text and URLs only.
 
 ## Roadmap
 

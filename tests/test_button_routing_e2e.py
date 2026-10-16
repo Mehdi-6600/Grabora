@@ -2,8 +2,11 @@
 
 Reproduces the reported bug: Telegram delivers a reply-keyboard tap as a plain
 text message, so the text must match a handler registered *after* the access
-middleware (which injects ``db_user``). This test runs the real dispatcher with
-the same middleware/router order as ``main.py``, with a network-free bot session.
+middleware (which injects ``db_user``).
+
+The dispatcher comes from ``main.build_dispatcher()`` — the same object
+production builds — so the middleware and router wiring under test cannot drift
+away from the deployed one.
 """
 
 from datetime import datetime, timezone
@@ -11,20 +14,15 @@ from datetime import datetime, timezone
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Chat, Message, Update
 from aiogram.types import User as TgUser
 
-from bot.handlers import admin, card_payment, download, start, subscription
-from bot.handlers.card_payment import TrackingCancelMiddleware
 from bot.keyboards.reply import (
     BTN_ACCOUNT,
     BTN_DOWNLOAD,
     BTN_HELP,
     BTN_SUBSCRIPTION,
 )
-from bot.middlewares.access import AccessMiddleware, AdminMiddleware
-from bot.middlewares.throttling import ThrottlingMiddleware
 from bot.utils.messages import DOWNLOAD_PROMPT, HELP, SUBSCRIPTION_INFO
 from config import TIER_DAILY_LIMITS, TIER_FREE
 
@@ -66,20 +64,10 @@ class RecordingSession(BaseSession):
 
 @pytest.fixture(scope="session")
 def dispatcher() -> Dispatcher:
-    """Dispatcher wired exactly like main.py (routers can only attach once)."""
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.message.middleware(ThrottlingMiddleware())
-    dp.message.middleware(TrackingCancelMiddleware())
-    dp.message.middleware(AccessMiddleware())
-    dp.callback_query.middleware(AccessMiddleware())
-    admin.router.message.middleware(AdminMiddleware())
-    admin.router.callback_query.middleware(AdminMiddleware())
-    dp.include_router(start.router)
-    dp.include_router(download.router)
-    dp.include_router(card_payment.router)
-    dp.include_router(subscription.router)
-    dp.include_router(admin.router)
-    return dp
+    """The production dispatcher (routers can only be attached once per process)."""
+    from main import build_dispatcher
+
+    return build_dispatcher()
 
 
 async def tap(dispatcher: Dispatcher, text: str, user_id: int, update_id: int = 1):

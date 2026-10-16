@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from bot.handlers import admin as admin_handlers
 from bot.keyboards.reply import (
@@ -61,7 +61,10 @@ class AdminPanelMiddleware(AdminMiddleware):
             logger.info("Admin panel blocked for non-admin %s", getattr(user, "id", None))
             if isinstance(event, Message):
                 await event.answer(ADMIN_ONLY)
+            elif isinstance(event, CallbackQuery):
+                await event.answer(ADMIN_ONLY, show_alert=True)
             return None
+        logger.debug("Admin panel pass for admin %s (%s)", user.id, type(event).__name__)
         return await handler(event, data)
 
 
