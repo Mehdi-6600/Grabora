@@ -174,7 +174,7 @@ CARD_UPDATED = "✅ اطلاعات کارت به‌روزرسانی شد.\nشم�
 CARD_CURRENT = "💳 اطلاعات کارت فعلی:\nشماره کارت: `{card_number}`\nبه نام: {card_holder}"
 CARD_USAGE = "استفاده: /card <شماره کارت> | <نام صاحب کارت>"
 
-NO_PENDING_PAYMENTS = "پرداخت در انتظار تأییدی وجود ندارد."
+NO_PENDING_PAYMENTS = "هیچ پرداخت در انتظاری نیست."
 
 USAGE_REJECT = "استفاده: /reject <payment_id>"
 PAYMENT_NOT_FOUND = "پرداخت یافت نشد."
@@ -204,6 +204,46 @@ ADMIN_DUPLICATE_TRACKING_WARNING = (
 ADMIN_APPROVED_USER = "پرداخت #{payment_id} تأیید شد."
 
 ADMIN_APPROVAL_PROMPT = "برای تأیید، بسته مربوط به این پرداخت را انتخاب کنید:"
+
+# ---------------------------------------------------------------------------
+# Admin panel
+# ---------------------------------------------------------------------------
+
+ADMIN_PANEL_TITLE = (
+    "🎛 پنل مدیریت\n"
+    "از دکمه‌های زیر برای مدیریت ربات استفاده کنید.\n"
+    "برای خروج روی «{exit_button}» بزنید."
+)
+
+ADMIN_PANEL_EXIT = "از پنل مدیریت خارج شدید. به منوی کاربری برگشتید."
+
+ADMIN_PANEL_USAGE = "برای باز کردن پنل مدیریت دستور /admin را بزنید."
+
+ADMIN_TEST_ALERT_TEXT = (
+    "🔧 پیام آزمایشی پنل مدیریت\n"
+    "اگر این پیام را می‌بینید، اطلاع‌رسانی ادمین درست کار می‌کند."
+)
+
+ADMIN_TEST_ALERT_REPORT = "🔧 نتیجه تست اطلاع‌رسانی:\n{rows}"
+
+ADMIN_TEST_ALERT_ROW_OK = "✅ ادمین {admin_id}: ارسال شد"
+
+ADMIN_TEST_ALERT_ROW_FAILED = "❌ ادمین {admin_id}: {error}"
+
+ADMIN_TEST_ALERT_SUMMARY = "{ok} از {total} ادمین پیام را دریافت کردند."
+
+ADMIN_TEST_ALERT_NO_ADMINS = (
+    "⚠️ هیچ ادمینی تنظیم نشده است (ADMIN_IDS خالی است).\n"
+    "مقدار ADMIN_IDS را در متغیرهای محیطی تنظیم کنید."
+)
+
+# Shown whenever a notification fails because the admin never started the bot.
+ADMIN_NOTIFY_START_HINT = (
+    "⚠️ تلگرام اجازه نمی‌دهد ربات به کسی که چت را شروع نکرده پیام بدهد.\n"
+    "ادمین باید یک بار /start را به ربات بفرستد و سپس دوباره تلاش کنید."
+)
+
+
 
 STAGE_MONTHLY = "اشتراک ماهانه"
 STAGE_QUARTERLY = "اشتراک سه‌ماهه"

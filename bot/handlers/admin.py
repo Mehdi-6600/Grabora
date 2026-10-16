@@ -12,9 +12,17 @@ from aiogram.types import CallbackQuery, Message
 
 from bot.handlers.card_payment import build_admin_payment_text
 from bot.keyboards.inline import admin_approval_keyboard
+from bot.utils.admin_notify import send_to_admins
 from bot.utils.messages import (
     ADMIN_APPROVED_USER,
     ADMIN_APPROVAL_PROMPT,
+    ADMIN_NOTIFY_START_HINT,
+    ADMIN_TEST_ALERT_NO_ADMINS,
+    ADMIN_TEST_ALERT_REPORT,
+    ADMIN_TEST_ALERT_ROW_FAILED,
+    ADMIN_TEST_ALERT_ROW_OK,
+    ADMIN_TEST_ALERT_SUMMARY,
+    ADMIN_TEST_ALERT_TEXT,
     ADMIN_DUPLICATE_TRACKING_WARNING,
     ADMIN_ONLY,
     ADMIN_PAYMENT_APPROVED,
@@ -80,11 +88,8 @@ def _is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
-@router.message(Command("stats"))
-async def cmd_stats(message: Message) -> None:
-    if not _is_admin(message.from_user.id if message.from_user else 0):
-        await message.answer(ADMIN_ONLY)
-        return
+async def send_stats(message: Message) -> None:
+    """Send the bot statistics (shared by /stats and the admin panel button)."""
     from database.queries import get_recent_payments, get_stats_summary
 
     stats = await get_stats_summary()
@@ -99,6 +104,14 @@ async def cmd_stats(message: Message) -> None:
     await message.answer(text)
 
 
+@router.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    if not _is_admin(message.from_user.id if message.from_user else 0):
+        await message.answer(ADMIN_ONLY)
+        return
+    await send_stats(message)
+
+
 @router.message(Command("broadcast"))
 async def cmd_broadcast(message: Message) -> None:
     if not _is_admin(message.from_user.id if message.from_user else 0):
@@ -106,7 +119,7 @@ async def cmd_broadcast(message: Message) -> None:
         return
     text = (message.text or "").removeprefix("/broadcast").strip()
     if not text:
-        await message.answer(ENTER_BROADCAST_TEXT)
+        await send_broadcast_prompt(message)
         return
     from aiogram import Bot
 
@@ -120,6 +133,11 @@ async def cmd_broadcast(message: Message) -> None:
         except Exception:  # noqa: BLE001
             logger.debug("Failed to send broadcast to %s", uid)
     await message.answer(BROADCAST_DONE.format(count=sent))
+
+
+async def send_broadcast_prompt(message: Message) -> None:
+    """Ask for the broadcast text (shared by /broadcast and the panel button)."""
+    await message.answer(ENTER_BROADCAST_TEXT)
 
 
 @router.message(Command("ban"))
@@ -360,7 +378,7 @@ async def _mark_admin_message(
     if callback.message is None:
         return
     base = getattr(callback.message, "text", None) or build_admin_payment_text(
-        payment, await get_user(payment.user_id)
+        payment, await get_user(payment.user_id), markdown=False
     )
     suffix = (
         ADMIN_PAYMENT_APPROVED.format(admin_username=admin_username)
@@ -373,11 +391,11 @@ async def _mark_admin_message(
         logger.debug("Failed to edit admin message: %s", exc)
 
 
-@router.message(Command("pending"))
-async def cmd_pending(message: Message) -> None:
-    if not _is_admin(message.from_user.id if message.from_user else 0):
-        await message.answer(ADMIN_ONLY)
-        return
+async def send_pending_payments(message: Message) -> None:
+    """List pending manual payments with approval buttons.
+
+    Shared by /pending and the "💳 پرداخت‌های در انتظار" panel button.
+    """
     payments = await get_pending_manual_payments()
     if not payments:
         await message.answer(NO_PENDING_PAYMENTS)
@@ -392,24 +410,37 @@ async def cmd_pending(message: Message) -> None:
         )
 
 
+@router.message(Command("pending"))
+async def cmd_pending(message: Message) -> None:
+    if not _is_admin(message.from_user.id if message.from_user else 0):
+        await message.answer(ADMIN_ONLY)
+        return
+    await send_pending_payments(message)
+
+
+async def send_card_overview(message: Message) -> None:
+    """Show the stored card details (shared by /card and the panel button)."""
+    from config import CARD_HOLDER, CARD_NUMBER
+
+    number = (await get_setting("card_number")) or CARD_NUMBER
+    holder = (await get_setting("card_holder")) or CARD_HOLDER
+    await message.answer(
+        CARD_CURRENT.format(card_number=number, card_holder=holder),
+        parse_mode="Markdown",
+    )
+
+
 @router.message(Command("card"))
 async def cmd_card(message: Message) -> None:
     if not _is_admin(message.from_user.id if message.from_user else 0):
         await message.answer(ADMIN_ONLY)
         return
 
-    from config import CARD_HOLDER, CARD_NUMBER
-
     parts = (message.text or "").split(maxsplit=1)
     args = parts[1].strip() if len(parts) > 1 else ""
 
     if not args:
-        number = (await get_setting("card_number")) or CARD_NUMBER
-        holder = (await get_setting("card_holder")) or CARD_HOLDER
-        await message.answer(
-            CARD_CURRENT.format(card_number=number, card_holder=holder),
-            parse_mode="Markdown",
-        )
+        await send_card_overview(message)
         return
 
     if "|" not in args:
@@ -468,6 +499,51 @@ async def cmd_reject(message: Message) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Admin notifications (/test_alert)
+# ---------------------------------------------------------------------------
+
+
+async def send_test_alert(message: Message) -> None:
+    """Probe admin notification delivery and report it per admin.
+
+    This is the diagnostic tool for "the admin gets no notifications": it
+    reports which admins were reachable, the exact Telegram error for the ones
+    that were not, and what to do about it (press /start).
+    """
+    results = await send_to_admins(message.bot, ADMIN_TEST_ALERT_TEXT)
+    if not results:
+        await message.answer(ADMIN_TEST_ALERT_NO_ADMINS)
+        return
+
+    rows = []
+    for result in results:
+        if result.ok:
+            rows.append(ADMIN_TEST_ALERT_ROW_OK.format(admin_id=result.admin_id))
+        else:
+            rows.append(
+                ADMIN_TEST_ALERT_ROW_FAILED.format(
+                    admin_id=result.admin_id,
+                    error=result.error or "unknown error",
+                )
+            )
+    ok_count = sum(1 for r in results if r.ok)
+    text = ADMIN_TEST_ALERT_REPORT.format(rows="\n".join(rows)) + "\n" + (
+        ADMIN_TEST_ALERT_SUMMARY.format(ok=ok_count, total=len(results))
+    )
+    if ok_count < len(results):
+        text = f"{text}\n\n{ADMIN_NOTIFY_START_HINT}"
+    await message.answer(text)
+
+
+@router.message(Command("test_alert"))
+async def cmd_test_alert(message: Message) -> None:
+    if not _is_admin(message.from_user.id if message.from_user else 0):
+        await message.answer(ADMIN_ONLY)
+        return
+    await send_test_alert(message)
+
+
+# ---------------------------------------------------------------------------
 # Package prices (admin-editable, stored in the prices table)
 # ---------------------------------------------------------------------------
 
@@ -490,6 +566,11 @@ async def _prices_text() -> str:
     return PRICES_CURRENT.format(rows=rows)
 
 
+async def send_prices_table(message: Message) -> None:
+    """Show every package price (shared by /prices and the panel button)."""
+    await message.answer(await _prices_text())
+
+
 @router.message(Command("prices"))
 async def cmd_prices(message: Message) -> None:
     if not _is_admin(message.from_user.id if message.from_user else 0):
@@ -498,7 +579,7 @@ async def cmd_prices(message: Message) -> None:
 
     parts = (message.text or "").split()
     if len(parts) == 1:
-        await message.answer(await _prices_text())
+        await send_prices_table(message)
         return
 
     if len(parts) != 4:

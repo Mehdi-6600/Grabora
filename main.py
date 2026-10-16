@@ -12,7 +12,7 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from bot.handlers import admin, card_payment, download, start, subscription
+from bot.handlers import admin, admin_panel, card_payment, download, start, subscription
 from bot.middlewares.access import AccessMiddleware, AdminMiddleware
 from bot.handlers.card_payment import TrackingCancelMiddleware
 from bot.middlewares.throttling import ThrottlingMiddleware
@@ -104,12 +104,22 @@ async def main() -> None:
     admin.router.message.middleware(AdminMiddleware())
     admin.router.callback_query.middleware(AdminMiddleware())
 
+    # Admin panel: same admin gate, but it answers ADMIN_ONLY instead of
+    # rejecting silently (the panel is reachable by text, e.g. "/admin").
+    admin_panel.admin_panel_router.message.middleware(admin_panel.AdminPanelMiddleware())
+    admin_panel.admin_panel_router.callback_query.middleware(
+        admin_panel.AdminPanelMiddleware()
+    )
+
     # Routers (card first so "pay:card:" wins over the generic Stars handler).
     dp.include_router(start.router)
     dp.include_router(download.router)
     dp.include_router(card_payment.router)
     dp.include_router(subscription.router)
     dp.include_router(admin.router)
+    # Panel last: it must not shadow the commands above ("/panel" is its own
+    # command, and the button texts are unique to it).
+    dp.include_router(admin_panel.admin_panel_router)
 
     init_stars(bot, dp)
 

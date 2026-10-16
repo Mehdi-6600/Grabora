@@ -185,16 +185,17 @@ async def _handle_stars_payment(result: PaymentResult) -> None:
             )
 
     if _bot is not None:
-        for admin_id in ADMIN_IDS:
-            try:
-                await _bot.send_message(
-                    admin_id,
-                    ADMIN_PAYMENT_NOTICE.format(
-                        user_id=result.user_id, provider="stars", tier=tier, amount=result.amount
-                    ),
-                )
-            except Exception:  # noqa: BLE001
-                logger.debug("Failed to notify admin %s", admin_id)
+        # Same delivery path as card payments: logged, retried once and never
+        # silently swallowed (this used to be a debug-only except).
+        from bot.utils.admin_notify import send_to_admins
+
+        await send_to_admins(
+            _bot,
+            ADMIN_PAYMENT_NOTICE.format(
+                user_id=result.user_id, provider="stars", tier=tier, amount=result.amount
+            ),
+            admin_ids=ADMIN_IDS,
+        )
 
 
 def get_stars() -> Any:
