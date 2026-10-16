@@ -10,7 +10,7 @@ from aiogram import Bot
 from config import (
     ADDON_2K_TIER,
     ADMIN_IDS,
-    PACKAGE_PRICES_STARS,
+    PACKAGE_KEYS,
     TIER_DAILY_LIMITS,
     TIER_MONTHLY,
     TIER_QUARTERLY,
@@ -19,6 +19,7 @@ from config import (
 from database.queries import (
     activate_subscription,
     create_payment,
+    get_all_prices,
     get_payment_by_transaction_id,
     get_user,
 )
@@ -69,24 +70,29 @@ async def setup_stars(
         return
     _on_payment_callback = on_payment
 
+    # Stars prices are admin-editable via /prices, so they come from the DB.
+    prices = await get_all_prices()
     stages = {
-        "monthly": (TIER_MONTHLY, PACKAGE_PRICES_STARS["monthly"], False, STAGE_MONTHLY),
-        "quarterly": (TIER_QUARTERLY, PACKAGE_PRICES_STARS["quarterly"], False, STAGE_QUARTERLY),
-        "yearly": (TIER_YEARLY, PACKAGE_PRICES_STARS["yearly"], False, STAGE_YEARLY),
-        "addon_2k": (ADDON_2K_TIER, PACKAGE_PRICES_STARS["addon_2k"], True, STAGE_ADDON_2K),
+        "monthly": (TIER_MONTHLY, False, STAGE_MONTHLY),
+        "quarterly": (TIER_QUARTERLY, False, STAGE_QUARTERLY),
+        "yearly": (TIER_YEARLY, False, STAGE_YEARLY),
+        "addon_2k": (ADDON_2K_TIER, True, STAGE_ADDON_2K),
     }
-    for stage_id, (tier, price, is_addon, title) in stages.items():
+    for stage_id, (tier, is_addon, title) in stages.items():
+        _stars_price = prices.get(stage_id, (0, 0))[1]
         stage = PaymentStage(
             title=title[:32],
             description=f"Grabora subscription: {title}",
-            price=price,
+            price=_stars_price,
             payload={"tier": tier, "is_addon": is_addon},
         )
         try:
             _neonpay.create_payment_stage(stage_id, stage)
         except ValueError:
-            # Already exists (re-setup).
-            pass
+            # Already exists (re-setup): refresh the price in place.
+            existing = _neonpay.get_payment_stage(stage_id)
+            if existing is not None:
+                existing.price = _stars_price
 
     async def _callback(result: PaymentResult) -> None:
         await _handle_stars_payment(result)
@@ -94,6 +100,44 @@ async def setup_stars(
     _neonpay.on_payment(_callback)
     await _neonpay.setup()
     logger.info("Neonpay (Stars) setup complete")
+
+
+async def refresh_stars_prices() -> int:
+    """Re-sync the Stars invoice prices with the DB. Returns how many changed.
+
+    neonpay reads ``stage.price`` when an invoice is sent, so updating the
+    stored stage object makes an admin's /prices change take effect for the
+    next invoice without a restart.
+    """
+    if _neonpay is None:
+        return 0
+    try:
+        prices = await get_all_prices()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not refresh Stars prices: %s", exc)
+        return 0
+    changed = 0
+    for stage_id in PACKAGE_KEYS:
+        stage = _neonpay.get_payment_stage(stage_id)
+        if stage is None:
+            continue
+        new_price = prices.get(stage_id, (0, 0))[1]
+        if not new_price or int(stage.price) == int(new_price):
+            continue
+        # neonpay rejects prices outside 1..2500 Stars.
+        if not 1 <= int(new_price) <= 2500:
+            logger.warning(
+                "Stars price %s for %s is out of neonpay's 1..2500 range; "
+                "leaving the stage at %s until it is fixed",
+                new_price,
+                stage_id,
+                stage.price,
+            )
+            continue
+        logger.info("Stars price for %s: %s -> %s", stage_id, stage.price, new_price)
+        stage.price = int(new_price)
+        changed += 1
+    return changed
 
 
 async def _handle_stars_payment(result: PaymentResult) -> None:

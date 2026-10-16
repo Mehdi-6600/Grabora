@@ -17,6 +17,23 @@ HELP = (
 
 SUBSCRIPTION_INFO = "اشتراک فعلی: {tier}\nدانلود امروز: {used}/{limit}"
 
+DOWNLOAD_PROMPT = "لینک ویدیو یا آهنگ مورد نظر را ارسال کنید تا دانلود شود."
+
+ACCOUNT_INFO = (
+    "👤 حساب من\n"
+    "\n"
+    "شناسه: `{user_id}`\n"
+    "اشتراک: {tier}\n"
+    "وضعیت: {status}\n"
+    "{addon_line}"
+    "دانلود امروز: {used}/{limit}"
+)
+
+ACCOUNT_STATUS_ACTIVE = "فعال تا {expiry}"
+ACCOUNT_STATUS_FREE = "رایگان"
+ACCOUNT_ADDON_ACTIVE = "افزونه 2K: فعال تا {expiry}\n"
+ACCOUNT_ADDON_INACTIVE = "افزونه 2K: غیرفعال\n"
+
 DAILY_LIMIT_REACHED = (
     "امروز به حد مجاز دانلود رسیدید. "
     "برای دانلود بیشتر اشتراک تهیه کنید."
@@ -201,9 +218,36 @@ STATS_SUMMARY = (
     "پرداخت‌های اخیر: {recent}"
 )
 
+# Inline subscription buttons (reply-keyboard texts live in bot/keyboards/reply.py).
 BTN_MONTHLY = "ماهانه"
 BTN_QUARTERLY = "سه‌ماهه"
 BTN_YEARLY = "سالانه"
 BTN_ADDON_2K = "افزونه 2K"
-BTN_SUBSCRIPTION = "اشتراک"
-BTN_HELP = "راهنما"
+
+# ---------------------------------------------------------------------------
+# Prices (admin)
+# ---------------------------------------------------------------------------
+
+PRICES_HEADER = "💰 قیمت‌های فعلی:"
+
+PRICES_ROW = "• {label}: {irr} ریال | {stars} استارز"
+
+PRICES_CURRENT = PRICES_HEADER + "\n{rows}"
+
+PRICES_UPDATED = (
+    "✅ قیمت {label} به‌روزرسانی شد.\n"
+    "قیمت جدید: {irr} ریال | {stars} استارز"
+)
+
+PRICES_USAGE = (
+    "استفاده:\n"
+    "/prices — نمایش قیمت‌های فعلی\n"
+    "/prices <package> <irr> <stars> — تغییر قیمت\n"
+    "بسته‌های مجاز: monthly, quarterly, yearly, addon_2k"
+)
+
+PRICES_INVALID_KEY = "بسته نامعتبر است. بسته‌های مجاز: monthly, quarterly, yearly, addon_2k"
+
+PRICES_INVALID_AMOUNT = (
+    "مبلغ نامعتبر است. ریال باید عددی بزرگ‌تر از صفر و استارز عددی بین ۱ تا ۲۵۰۰ باشد."
+)

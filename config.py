@@ -99,8 +99,14 @@ TIER_DURATIONS_DAYS: Final[dict[str, int]] = {
     TIER_YEARLY: 365,
 }
 
-# Package prices — single source of truth.
-# Keys: monthly | quarterly | yearly | addon_2k
+# Package prices — SEED DEFAULTS ONLY.
+#
+# These values are used once, to seed the `prices` table on the first start
+# (INSERT OR IGNORE). After that the database is authoritative and the admin
+# edits prices at runtime with the /prices command; those changes are never
+# overwritten by these defaults. Read live prices with
+# database.queries.get_price() / get_all_prices() — do not read these dicts
+# from handlers. Keys: monthly | quarterly | yearly | addon_2k
 PACKAGE_PRICES_IRR: Final[dict[str, int]] = {
     "monthly": 50_000,
     "quarterly": 120_000,

@@ -26,6 +26,12 @@ from bot.utils.messages import (
     PAYMENT_NOT_FOUND,
     PAYMENT_REJECTED,
     PENDING_EXISTS,
+    PRICES_CURRENT,
+    PRICES_INVALID_AMOUNT,
+    PRICES_INVALID_KEY,
+    PRICES_ROW,
+    PRICES_UPDATED,
+    PRICES_USAGE,
     USAGE_REJECT,
     tier_label,
     BROADCAST_DONE,
@@ -44,10 +50,12 @@ from bot.utils.messages import (
     USER_BANNED,
     USER_UNBANNED,
 )
-from config import ADDON_2K_TIER, TIER_DURATIONS_DAYS
+from config import ADDON_2K_TIER, PACKAGE_KEYS, TIER_DURATIONS_DAYS
 from database.models import Payment
 from database.queries import (
     activate_subscription,
+    get_all_prices,
+    set_price,
     get_payment_by_id,
     get_payment_by_tracking_number,
     get_pending_manual_payments,
@@ -456,4 +464,78 @@ async def cmd_reject(message: Message) -> None:
     await message.answer(
         f"{tier_label(payment.tier)} | #{payment_id}\n"
         + ADMIN_PAYMENT_REJECTED.format(admin_username=admin_username)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Package prices (admin-editable, stored in the prices table)
+# ---------------------------------------------------------------------------
+
+# neonpay enforces 1..2500 Stars per invoice; IRR has no such ceiling.
+MIN_STARS = 1
+MAX_STARS = 2500
+
+
+async def _prices_text() -> str:
+    prices = await get_all_prices()
+    rows = "\n".join(
+        PRICES_ROW.format(
+            label=f"{tier_label(key)} ({key})",
+            irr=f"{prices[key][0]:,}",
+            stars=f"{prices[key][1]:,}",
+        )
+        for key in PACKAGE_KEYS
+        if key in prices
+    )
+    return PRICES_CURRENT.format(rows=rows)
+
+
+@router.message(Command("prices"))
+async def cmd_prices(message: Message) -> None:
+    if not _is_admin(message.from_user.id if message.from_user else 0):
+        await message.answer(ADMIN_ONLY)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) == 1:
+        await message.answer(await _prices_text())
+        return
+
+    if len(parts) != 4:
+        await message.answer(PRICES_USAGE)
+        return
+
+    package_key = parts[1].strip().lower()
+    if package_key not in PACKAGE_KEYS:
+        await message.answer(PRICES_INVALID_KEY)
+        return
+
+    try:
+        irr = int(parts[2].replace(",", ""))
+        stars = int(parts[3].replace(",", ""))
+    except ValueError:
+        await message.answer(PRICES_INVALID_AMOUNT)
+        return
+
+    if irr <= 0 or not (MIN_STARS <= stars <= MAX_STARS):
+        await message.answer(PRICES_INVALID_AMOUNT)
+        return
+
+    await set_price(package_key, irr, stars)
+
+    # Stars invoices read the price from the neonpay stage, so re-sync it now
+    # instead of waiting for the next restart.
+    try:
+        from payments.stars import refresh_stars_prices
+
+        await refresh_stars_prices()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not refresh Stars prices: %s", exc)
+
+    await message.answer(
+        PRICES_UPDATED.format(
+            label=f"{tier_label(package_key)} ({package_key})",
+            irr=f"{irr:,}",
+            stars=f"{stars:,}",
+        )
     )

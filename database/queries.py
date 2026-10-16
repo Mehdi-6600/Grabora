@@ -345,6 +345,82 @@ async def list_all_user_ids() -> list[int]:
 
 
 # ---------------------------------------------------------------------------
+# Package prices (admin-editable, seeded from config defaults)
+# ---------------------------------------------------------------------------
+
+
+def _default_price(package_key: str) -> tuple[int, int]:
+    """Seed/default price from config, used when the DB has no row."""
+    from config import PACKAGE_PRICES_IRR, PACKAGE_PRICES_STARS
+
+    if package_key not in PACKAGE_PRICES_IRR or package_key not in PACKAGE_PRICES_STARS:
+        raise KeyError(package_key)
+    return int(PACKAGE_PRICES_IRR[package_key]), int(PACKAGE_PRICES_STARS[package_key])
+
+
+async def get_price(package_key: str) -> tuple[int, int]:
+    """Return ``(price_irr, price_stars)`` for a package.
+
+    Looks the package up in the ``prices`` table and falls back to the
+    config defaults when no row exists. Raises ``KeyError`` for a package
+    key that is not configured at all.
+    """
+    _default_price(package_key)  # validates the key
+    db = get_db()
+    async with db.execute(
+        "SELECT price_irr, price_stars FROM prices WHERE package_key = ?",
+        (package_key,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        logger.debug("No stored price for %s; using config default", package_key)
+        return _default_price(package_key)
+    return int(row["price_irr"]), int(row["price_stars"])
+
+
+async def get_all_prices() -> dict[str, tuple[int, int]]:
+    """Return ``{package_key: (irr, stars)}`` for every configured package."""
+    from config import PACKAGE_KEYS
+
+    prices: dict[str, tuple[int, int]] = {}
+    db = get_db()
+    async with db.execute(
+        "SELECT package_key, price_irr, price_stars FROM prices"
+    ) as cursor:
+        rows = await cursor.fetchall()
+    stored = {
+        str(r["package_key"]): (int(r["price_irr"]), int(r["price_stars"])) for r in rows
+    }
+    # Only the configured packages are sold, so this dict is authoritative.
+    for package_key in PACKAGE_KEYS:
+        prices[package_key] = stored.get(package_key) or _default_price(package_key)
+    return prices
+
+
+async def set_price(package_key: str, irr: int, stars: int) -> None:
+    """Insert or update a package price."""
+    from config import PACKAGE_KEYS
+
+    if package_key not in PACKAGE_KEYS:
+        raise KeyError(package_key)
+    irr = int(irr)
+    stars = int(stars)
+    now = _iso(_now())
+    db = get_db()
+    await db.execute(
+        "INSERT INTO prices (package_key, price_irr, price_stars, updated_at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(package_key) DO UPDATE SET "
+        "price_irr = excluded.price_irr, "
+        "price_stars = excluded.price_stars, "
+        "updated_at = excluded.updated_at",
+        (package_key, irr, stars, now),
+    )
+    await db.commit()
+    logger.info("Price for %s set to %d IRR / %d Stars", package_key, irr, stars)
+
+
+# ---------------------------------------------------------------------------
 # Payments
 # ---------------------------------------------------------------------------
 
