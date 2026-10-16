@@ -1,4 +1,4 @@
-"""yt-dlp wrapper (async) with YouTube cookie / bot-check handling."""
+"""yt-dlp wrapper (async): cookies, bot-check ladder and rate-limit handling."""
 
 from __future__ import annotations
 
@@ -8,18 +8,39 @@ import binascii
 import importlib
 import logging
 import threading
+from collections import deque
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yt_dlp
 
-from config import YOUTUBE_COOKIES_B64, YOUTUBE_COOKIES_FILE
+from config import (
+    INSTAGRAM_COOKIES_B64,
+    INSTAGRAM_COOKIES_FILE,
+    YOUTUBE_COOKIES_B64,
+    YOUTUBE_COOKIES_FILE,
+)
 
 logger = logging.getLogger(__name__)
 
 _COOKIE_LOCK = threading.Lock()
 _cookie_file: Path | None = None
 _cookie_resolved = False
+_instagram_cookie_file: Path | None = None
+_instagram_cookie_resolved = False
+
+
+class MediaTooLargeError(RuntimeError):
+    """yt-dlp refused the media because it exceeds the requested max size.
+
+    Raised instead of a generic failure so the caller can answer with the
+    existing "file too large" message rather than "download failed".
+    """
+
+
+# Hosts handled by the Instagram extractor (www./m. subdomains included).
+_INSTAGRAM_HOSTS = ("instagram.com", "instagr.am")
 
 # Text markers that mean "YouTube wants a signed-in session".
 # Matched case-insensitively against the exception message chain.
@@ -84,17 +105,72 @@ def _supported_clients() -> frozenset[str]:
     return _FALLBACK_CLIENTS
 
 
-def _is_bot_check(exc: BaseException) -> bool:
-    """True if the failure is YouTube's bot/age verification wall."""
+# Text markers that mean "this site is throttling us" (HTTP 429).
+# Instagram answers with 429 or redirects anonymous requests to its login page,
+# and yt-dlp wraps both in ExtractorError('Unable to download webpage: ...'),
+# so the markers are matched along the whole exception chain.
+_RATE_LIMIT_MARKERS = (
+    "http error 429",
+    "too many requests",
+    "429: too many",
+    "rate-limit for accessing posts",
+    "rate limited",
+    "ratelimit",
+)
+
+
+def _exception_chain_text(exc: BaseException) -> str:
+    """Joined, lower-cased text of an exception and its cause/context chain."""
+    parts: list[str] = []
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        text = " ".join(str(arg) for arg in current.args).lower()
-        if any(marker in text for marker in _BOT_CHECK_MARKERS):
-            return True
+        parts.extend(str(arg) for arg in current.args)
+        parts.append(type(current).__name__)
         current = current.__cause__ or current.__context__
-    return False
+    return " ".join(parts).lower()
+
+
+def _is_bot_check(exc: BaseException) -> bool:
+    """True if the failure is YouTube's bot/age verification wall."""
+    text = _exception_chain_text(exc)
+    return any(marker in text for marker in _BOT_CHECK_MARKERS)
+
+
+def is_rate_limited(exc: BaseException) -> bool:
+    """True if the failure is a site-side rate limit (HTTP 429).
+
+    Used by the download flow to stop retrying: a rate limit is not transient
+    on a seconds timescale, and every retry is one more request against the
+    limit that is already being enforced (which is what amplifies a 429).
+    """
+    text = _exception_chain_text(exc)
+    return any(marker in text for marker in _RATE_LIMIT_MARKERS)
+
+
+def is_instagram_url(url: str) -> bool:
+    """True for instagram.com links (www./m. subdomains included)."""
+    try:
+        host = (urlparse(url).netloc or "").lower().split(":")[0]
+    except Exception:  # noqa: BLE001
+        return False
+    host = host.removeprefix("www.").removeprefix("m.")
+    return any(host == h or host.endswith("." + h) for h in _INSTAGRAM_HOSTS)
+
+
+def supports_size_probe(url: str) -> bool:
+    """Whether the pre-download size probe is worth its extra request.
+
+    Instagram: no. The probe calls ``extract_info(download=False)``, which for an
+    Instagram post is another anonymous ``GET /p/{id}`` (the request Instagram
+    rate-limits), and the post metadata usually carries no ``filesize`` at all —
+    so the request is spent and the estimate is discarded anyway. The existing
+    post-download size check still enforces the limit for every download, and
+    ``download(max_filesize_bytes=...)`` adds a pre-download abort with no extra
+    request. Other sites keep the probe unchanged.
+    """
+    return not is_instagram_url(url)
 
 
 def _clean_b64(value: str) -> str:
@@ -105,6 +181,38 @@ def _clean_b64(value: str) -> str:
 def _looks_like_cookiefile(raw: bytes) -> bool:
     head = raw[:4096].decode("utf-8", errors="ignore")
     return "Netscape HTTP Cookie File" in head or "\t" in head
+
+
+def _decode_cookie_blob(b64_value: str, env_name: str, target: Path, label: str) -> Path | None:
+    """Decode a base64 cookies.txt, write it 0600 and return its path.
+
+    Cookie content is never logged — only the byte count of what was written.
+    The env var name is used in messages so the owner knows which secret to fix.
+    """
+    try:
+        raw = base64.b64decode(_clean_b64(b64_value), validate=False)
+    except (binascii.Error, ValueError) as exc:
+        # Never log the value itself — it grants account access.
+        logger.error("%s is not valid base64: %s", env_name, exc)
+        return None
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+        target.chmod(0o600)
+    except OSError as exc:
+        logger.error("Could not write cookies file %s: %s", target, exc)
+        return None
+
+    if not _looks_like_cookiefile(raw):
+        logger.warning(
+            "Decoded %s does not look like a Netscape "
+            "cookies.txt (expected the 'Netscape HTTP Cookie File' header); "
+            "yt-dlp may reject it",
+            env_name,
+        )
+    logger.info("%s cookies written to %s (%d bytes)", label, target, len(raw))
+    return target
 
 
 def _resolve_cookie_file() -> Path | None:
@@ -120,33 +228,38 @@ def _resolve_cookie_file() -> Path | None:
             _cookie_file = None
             return None
 
-        target = Path(YOUTUBE_COOKIES_FILE)
-        try:
-            raw = base64.b64decode(_clean_b64(YOUTUBE_COOKIES_B64), validate=False)
-        except (binascii.Error, ValueError) as exc:
-            # Never log the value itself — it grants account access.
-            logger.error("YOUTUBE_COOKIES_B64 is not valid base64: %s", exc)
-            _cookie_file = None
-            return None
-
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(raw)
-            target.chmod(0o600)
-        except OSError as exc:
-            logger.error("Could not write cookies file %s: %s", target, exc)
-            _cookie_file = None
-            return None
-
-        if not _looks_like_cookiefile(raw):
-            logger.warning(
-                "Decoded YOUTUBE_COOKIES_B64 does not look like a Netscape "
-                "cookies.txt (expected the 'Netscape HTTP Cookie File' header); "
-                "yt-dlp may reject it",
-            )
-        logger.info("YouTube cookies written to %s (%d bytes)", target, len(raw))
-        _cookie_file = target
+        _cookie_file = _decode_cookie_blob(
+            YOUTUBE_COOKIES_B64, "YOUTUBE_COOKIES_B64", Path(YOUTUBE_COOKIES_FILE), "YouTube"
+        )
         return _cookie_file
+
+
+def _resolve_instagram_cookie_file() -> Path | None:
+    """Decode INSTAGRAM_COOKIES_B64 once (optional). Returns its path or None.
+
+    Not configured is a normal state: Instagram downloads keep using anonymous
+    access and every other site is unaffected.
+    """
+    global _instagram_cookie_file, _instagram_cookie_resolved
+    with _COOKIE_LOCK:
+        if _instagram_cookie_resolved:
+            return _instagram_cookie_file
+        _instagram_cookie_resolved = True
+
+        if not INSTAGRAM_COOKIES_B64:
+            logger.debug(
+                "INSTAGRAM_COOKIES_B64 not set; Instagram downloads use anonymous access"
+            )
+            _instagram_cookie_file = None
+            return None
+
+        _instagram_cookie_file = _decode_cookie_blob(
+            INSTAGRAM_COOKIES_B64,
+            "INSTAGRAM_COOKIES_B64",
+            Path(INSTAGRAM_COOKIES_FILE),
+            "Instagram",
+        )
+        return _instagram_cookie_file
 
 
 def prepare_youtube_cookies() -> bool:
@@ -155,11 +268,14 @@ def prepare_youtube_cookies() -> bool:
 
 
 def reset_cookie_cache() -> None:
-    """Forget the cached cookies file (used by tests)."""
+    """Forget the cached cookies files (used by tests)."""
     global _cookie_file, _cookie_resolved
+    global _instagram_cookie_file, _instagram_cookie_resolved
     with _COOKIE_LOCK:
         _cookie_file = None
         _cookie_resolved = False
+        _instagram_cookie_file = None
+        _instagram_cookie_resolved = False
 
 
 def _client_attempts() -> list[tuple[str, ...] | None]:
@@ -182,8 +298,18 @@ def _client_attempts() -> list[tuple[str, ...] | None]:
     return list(ladders) or [None]
 
 
-def _apply_cookies(opts: dict[str, Any]) -> None:
+def _apply_cookies(opts: dict[str, Any], url: str | None = None) -> None:
+    """Attach a cookies file to the yt-dlp options.
+
+    Instagram URLs use INSTAGRAM_COOKIES_* when it is configured. When it is
+    not, the behaviour is exactly what it was before this option existed (the
+    YouTube cookies file is passed for every site, and yt-dlp only sends the
+    cookies that match the target domain). ``url=None`` keeps the old call
+    shape for callers that only need the YouTube cookies.
+    """
     cookie_file = _resolve_cookie_file()
+    if url is not None and is_instagram_url(url):
+        cookie_file = _resolve_instagram_cookie_file() or cookie_file
     if cookie_file is not None:
         opts["cookiefile"] = str(cookie_file)
 
@@ -193,14 +319,61 @@ def _apply_clients(opts: dict[str, Any], clients: tuple[str, ...] | None) -> Non
         opts["extractor_args"] = {"youtube": {"player_client": list(clients)}}
 
 
-def _base_opts(output_dir: Path) -> dict[str, Any]:
-    return {
+# yt-dlp's own wording when it aborts because of ``max_filesize``.
+_MAX_FILESIZE_MARKER = "max-filesize"
+
+
+class YdlMessages:
+    """Captures yt-dlp output so nothing is lost and nothing is spammed.
+
+    Passing a ``logger`` to yt-dlp routes *all* of its output here instead of
+    stdout, which matters for two reasons:
+
+    * diagnostics — with the default settings (``quiet``/``no_warnings``) the
+      real reason for a failure (rate limit, login wall, retry notice) never
+      reaches our logs. Warnings and errors are now logged, and progress lines
+      are kept in a small ring buffer;
+    * ``max_filesize`` — the downloader aborts with a plain ``to_screen``
+      message and a ``False`` return value (no exception), so the message is the
+      only way to tell "too large" apart from "download failed".
+    """
+
+    def __init__(self, keep: int = 50) -> None:
+        self.lines: deque[str] = deque(maxlen=keep)
+
+    def debug(self, message: str) -> None:
+        self.lines.append(str(message))
+
+    def info(self, message: str) -> None:
+        self.lines.append(str(message))
+
+    def warning(self, message: str) -> None:
+        self.lines.append(str(message))
+        logger.warning("yt-dlp: %s", message)
+
+    def error(self, message: str) -> None:
+        self.lines.append(str(message))
+        logger.error("yt-dlp: %s", message)
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self.lines)
+
+    def exceeded_max_filesize(self) -> bool:
+        return _MAX_FILESIZE_MARKER in self.text.lower()
+
+
+def _base_opts(output_dir: Path, messages: YdlMessages | None = None) -> dict[str, Any]:
+    opts: dict[str, Any] = {
         "outtmpl": str(output_dir / "%(title).80s [%(id)s].%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "retries": 3,
     }
+    if messages is not None:
+        opts["logger"] = messages
+    return opts
 
 
 def _apply_format(opts: dict[str, Any], quality: str, media_type: str) -> None:
@@ -236,11 +409,19 @@ def _build_opts(
     quality: str,
     media_type: str,
     clients: tuple[str, ...] | None,
+    url: str | None = None,
+    max_filesize_bytes: int | None = None,
+    messages: YdlMessages | None = None,
 ) -> dict[str, Any]:
-    opts = _base_opts(output_dir)
-    _apply_cookies(opts)
+    opts = _base_opts(output_dir, messages)
+    _apply_cookies(opts, url)
     _apply_clients(opts, clients)
     _apply_format(opts, quality, media_type)
+    if max_filesize_bytes is not None:
+        # Let yt-dlp abort oversized media before it is written to disk. Used
+        # for sites where the pre-download probe is skipped (Instagram), so the
+        # size limit still stops a download early without an extra request.
+        opts["max_filesize"] = int(max_filesize_bytes)
     return opts
 
 
@@ -251,7 +432,7 @@ def _extract_info(url: str) -> dict[str, Any]:
     clients = attempts[0] if attempts else None
     opts = _base_opts(Path("."))
     opts.pop("outtmpl", None)
-    _apply_cookies(opts)
+    _apply_cookies(opts, url)
     _apply_clients(opts, clients)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -264,13 +445,28 @@ async def extract_info(url: str) -> dict[str, Any]:
     return await asyncio.to_thread(_extract_info, url)
 
 
-def _download(url: str, quality: str, media_type: str, output_dir: Path) -> Path:
+def _download(
+    url: str,
+    quality: str,
+    media_type: str,
+    output_dir: Path,
+    max_filesize_bytes: int | None = None,
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     attempts = _client_attempts()
     last_exc: BaseException | None = None
+    messages = YdlMessages()
 
     for index, clients in enumerate(attempts):
-        opts = _build_opts(output_dir, quality, media_type, clients)
+        opts = _build_opts(
+            output_dir,
+            quality,
+            media_type,
+            clients,
+            url=url,
+            max_filesize_bytes=max_filesize_bytes,
+            messages=messages,
+        )
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -292,9 +488,17 @@ def _download(url: str, quality: str, media_type: str, output_dir: Path) -> Path
                     if files:
                         path = files[0]
                 if not path.exists():
+                    if messages.exceeded_max_filesize():
+                        # yt-dlp aborted before writing (no exception), so the
+                        # reason has to come from its output.
+                        raise MediaTooLargeError(
+                            "yt-dlp aborted: media is larger than max_filesize"
+                        )
                     raise RuntimeError("Downloaded file not found")
                 return path
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, MediaTooLargeError):
+                raise
             is_last = index == len(attempts) - 1
             if is_last or not _is_bot_check(exc):
                 raise
@@ -312,5 +516,14 @@ def _download(url: str, quality: str, media_type: str, output_dir: Path) -> Path
     raise RuntimeError("Download failed")
 
 
-async def download(url: str, quality: str, media_type: str, output_dir: Path) -> Path:
-    return await asyncio.to_thread(_download, url, quality, media_type, output_dir)
+async def download(
+    url: str,
+    quality: str,
+    media_type: str,
+    output_dir: Path,
+    max_filesize_bytes: int | None = None,
+) -> Path:
+    """Download ``url``; ``max_filesize_bytes`` aborts oversized media early."""
+    return await asyncio.to_thread(
+        _download, url, quality, media_type, output_dir, max_filesize_bytes
+    )

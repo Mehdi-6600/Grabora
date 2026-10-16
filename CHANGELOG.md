@@ -3,6 +3,44 @@
 ## [Unreleased]
 
 ### Fixed
+- **Instagram downloads failed with `HTTP Error 429: Too Many Requests` and the bot answered with a generic
+  "download failed".** Three verified causes, all in our code:
+  *(a)* `bot/handlers/download.py` retried **every** exception immediately once (`for attempt in range(2)`,
+  no backoff). For a 429 that is a second request against a limit that is already being enforced, which is
+  what makes a throttled IP stay throttled. A rate limit is now detected through the whole exception chain
+  (`__cause__`/`__context__`, so a wrapped `ExtractorError('Unable to download webpage: HTTP Error 429')` is
+  caught) and is never retried; other errors keep their previous single retry.
+  *(b)* Gate 2 (`_probe_size_mb`) ran a **second full extractor request** for the same URL before downloading.
+  For Instagram that request is another anonymous `GET /p/{id}` — the exact request being rate-limited — and
+  the post metadata usually has no `filesize` at all, so the request was spent and the estimate discarded.
+  Instagram now skips the probe and gets `max_filesize` for the user's tier instead: `yt-dlp` aborts oversized
+  media *before* writing it, and the post-download size check still runs for every download. Other sites keep
+  the probe. (`downloader/ytdlp_wrapper.py::supports_size_probe`)
+  *(c)* the failure text: a rate limit now answers with a Persian message that Instagram temporarily limited the
+  bot's requests and to try later (`INSTAGRAM_RATE_LIMITED`; other sites get `RATE_LIMITED`), never a stack
+  trace, header, URL parameter or cookie. A `max_filesize` abort maps back to the existing size-limit/upsell
+  message instead of "download failed".
+- **yt-dlp's own diagnostics were invisible.** With `quiet`/`no_warnings` the real reason for a failure never
+  reached the log. All yt-dlp output now goes through `YdlMessages` (`logger=` param): warnings and errors are
+  logged (the rate-limit notice included), progress lines are kept in a small ring buffer, and the buffer is
+  what detects a `max_filesize` abort (`downloader/http.py` returns `False` silently, so no exception exists to
+  catch).
+
+### Added
+- **Optional Instagram cookies**: `INSTAGRAM_COOKIES_B64` (+ `INSTAGRAM_COOKIES_FILE`, default
+  `/tmp/instagram_cookies.txt`, written `0600`). A signed-in session makes Instagram use a different extraction
+  path, which is the documented way around anonymous rate limiting. Unset by default: Instagram falls back to
+  anonymous access and every other site is untouched (the option is never applied to a non-Instagram URL). The
+  value is never logged, there is no login flow and no password handling — cookies do not bypass an IP-level
+  limit. See the README section "Instagram rate limits (HTTP 429)".
+- `downloader.ytdlp_wrapper.MediaTooLargeError`, plus `is_rate_limited()`, `is_instagram_url()` and
+  `supports_size_probe()` helpers, and `download(..., max_filesize_bytes=...)`.
+- `tests/test_instagram_429.py` (26 tests, all mocked — no request is ever sent to Instagram): detection through
+  wrapped exceptions, no-retry on 429, retry kept for other errors, probe skipped for Instagram but kept
+  elsewhere, tier limits passed to yt-dlp, cookie scoping/optionality/log-safety, temp-file cleanup, and the
+  `max_filesize` output detection.
+
+### Fixed
 - **CRITICAL: `/start` (and every other message) could be silently swallowed, making the bot look dead.**
   `ThrottlingMiddleware` runs on `dp.message`, i.e. it wraps the whole router chain (`Dispatcher.propagate_event`
   → `_propagate_event` → sub-routers), and it returned `None` for any message sent within `THROTTLE_SECONDS`
