@@ -7,16 +7,28 @@ import logging
 import signal
 from pathlib import Path
 
+from aiogram import Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
+from aiogram.exceptions import TelegramConflictError
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from bot.handlers import admin, admin_panel, card_payment, download, start, subscription
+from bot.handlers import (
+    admin,
+    admin_panel,
+    card_payment,
+    download,
+    fallback,
+    start,
+    subscription,
+)
 from bot.middlewares.access import AccessMiddleware, AdminMiddleware
 from bot.handlers.card_payment import TrackingCancelMiddleware
+from bot.middlewares.ping import PingMiddleware
 from bot.middlewares.throttling import ThrottlingMiddleware
 from config import (
+    ADMIN_IDS,
     BOT_API_URL,
     BOT_TOKEN,
     CLEANUP_INTERVAL_HOURS,
@@ -70,29 +82,35 @@ async def cleanup_temp_files() -> None:
         logger.info("Cleaned up %d temp files", removed)
 
 
-async def main() -> None:
-    validate()
-    setup_logging()
+_dispatcher: Dispatcher | None = None
 
-    await init_db()
-    from database.queries import seed_settings
-    from config import CARD_NUMBER, CARD_HOLDER
-    await seed_settings(CARD_NUMBER, CARD_HOLDER)
 
-    # Resolve the YouTube cookies file now so the log tells us immediately
-    # whether YouTube downloads can succeed from this host.
-    from downloader.ytdlp_wrapper import prepare_youtube_cookies
+def build_dispatcher() -> Dispatcher:
+    """Build the dispatcher with the production middleware/router wiring.
 
-    prepare_youtube_cookies()
+    Single source of truth: ``main()`` and the tests both call this, so a wiring
+    mistake (a middleware that swallows updates, a router included too late)
+    cannot pass the test suite and still break production.
 
-    from aiogram import Bot, Dispatcher
+    Order matters and is load-bearing:
 
-    session = AiohttpSession(api=TelegramAPIServer.from_base(BOT_API_URL))
-    bot = Bot(token=BOT_TOKEN, session=session)
-    storage = MemoryStorage()
-    dp = Dispatcher(storage=storage)
+    * ``PingMiddleware`` is **first** so ``/ping`` can never be swallowed by the
+      middleware below it — it is the "is the bot alive?" probe.
+    * The other middlewares are registered on ``dp.message``/``dp.callback_query``
+      and therefore wrap the whole router chain. Any of them returning ``None``
+      silently kills the update (see ``bot/middlewares/throttling.py``).
+    * ``fallback.router`` is included **last**: everything unmatched is logged
+      and answered instead of disappearing.
+    """
+    global _dispatcher
+    if _dispatcher is not None:
+        # Routers can only be attached once per process; tests reuse the wiring.
+        return _dispatcher
+
+    dp = Dispatcher(storage=MemoryStorage())
 
     # Middlewares (order matters).
+    dp.message.middleware(PingMiddleware())
     dp.message.middleware(ThrottlingMiddleware())
     # Cancels a pending tracking-number flow when the user sends a URL/command
     # (the update itself is still handled normally afterwards).
@@ -120,6 +138,73 @@ async def main() -> None:
     # Panel last: it must not shadow the commands above ("/panel" is its own
     # command, and the button texts are unique to it).
     dp.include_router(admin_panel.admin_panel_router)
+    # Fallback absolutely last: logs + answers anything the chain did not claim.
+    dp.include_router(fallback.router)
+
+    logger.info(
+        "Dispatcher wired: message middleware=[ping, throttling, tracking-cancel, "
+        "access] | callback middleware=[access] | routers=[start, download, "
+        "card_payment, subscription, admin, admin_panel, fallback]"
+    )
+    _dispatcher = dp
+    return dp
+
+
+def log_polling_exit(task: asyncio.Task) -> None:
+    """Log *why* polling finished.
+
+    ``start_polling`` only returns when it was stopped or killed. Without this,
+    a dying polling task turns into a silent restart loop — the bot is
+    unreachable while it restarts and the log never says why. The exception is
+    always retrieved here as well, so it cannot be lost.
+    """
+    if task.cancelled():
+        logger.info("Polling task cancelled")
+    else:
+        exc = task.exception()
+        if exc is None:
+            logger.warning("Polling task finished on its own (no exception)")
+        elif isinstance(exc, TelegramConflictError):
+            logger.error(
+                "Polling stopped: TelegramConflictError — another process or an "
+                "active webhook is polling the same BOT_TOKEN. Only one instance "
+                "may poll a token (%s)",
+                exc,
+            )
+        else:
+            logger.error(
+                "Polling task died: %s: %s", type(exc).__name__, exc, exc_info=exc
+            )
+
+
+async def main() -> None:
+    validate()
+    setup_logging()
+
+    await init_db()
+    from database.queries import seed_settings
+    from config import CARD_NUMBER, CARD_HOLDER
+    await seed_settings(CARD_NUMBER, CARD_HOLDER)
+
+    # Resolve the YouTube cookies file now so the log tells us immediately
+    # whether YouTube downloads can succeed from this host.
+    from downloader.ytdlp_wrapper import prepare_youtube_cookies
+
+    prepare_youtube_cookies()
+
+    from aiogram import Bot
+
+    session = AiohttpSession(api=TelegramAPIServer.from_base(BOT_API_URL))
+    bot = Bot(token=BOT_TOKEN, session=session)
+    dp = build_dispatcher()
+
+    if not ADMIN_IDS:
+        logger.warning(
+            "ADMIN_IDS is empty: nobody will receive payment/download "
+            "notifications. Set ADMIN_IDS in the environment."
+        )
+    else:
+        logger.info("Admins configured: %d", len(ADMIN_IDS))
 
     init_stars(bot, dp)
 
@@ -197,6 +282,7 @@ async def main() -> None:
     bot_task = asyncio.create_task(dp.start_polling(bot))
 
     def _on_done(_task: asyncio.Task) -> None:
+        log_polling_exit(_task)
         stop_event.set()
 
     bot_task.add_done_callback(_on_done)
