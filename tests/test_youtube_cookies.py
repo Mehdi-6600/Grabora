@@ -110,12 +110,37 @@ def test_invalid_base64_is_non_fatal(monkeypatch, tmp_path, caplog):
     assert "!!!not-base64!!!" not in caplog.text
 
 
-def test_non_netscape_payload_warns(monkeypatch, tmp_path, caplog):
+def test_non_netscape_payload_is_refused(monkeypatch, tmp_path, caplog):
+    """A payload yt-dlp cannot load must be ignored, never written.
+
+    Verified against yt-dlp: passing such a file raises
+    ``DownloadError: Cookies file must be Netscape formatted, not JSON`` on
+    *every* download, i.e. one bad secret would break all sites. Ignoring it
+    keeps the previous anonymous behaviour instead.
+    """
     payload = base64.b64encode(b'{"cookies": []}').decode()
-    _set_cookies(monkeypatch, payload, tmp_path / "cookies.txt")
-    with caplog.at_level("WARNING"):
-        assert w.prepare_youtube_cookies() is True
-    assert "does not look like a Netscape" in caplog.text
+    target = tmp_path / "cookies.txt"
+    _set_cookies(monkeypatch, payload, target)
+
+    with caplog.at_level("ERROR"):
+        assert w.prepare_youtube_cookies() is False  # no cookies in use
+
+    assert not target.exists(), "an unloadable cookies file must not be written"
+    assert "Ignoring YOUTUBE_COOKIES_B64" in caplog.text
+    assert '{"cookies": []}' not in caplog.text  # the payload is never echoed
+
+
+def test_header_only_payload_is_refused(monkeypatch, tmp_path, caplog):
+    """A header-only export carries no cookies: it must not be reported as active."""
+    payload = base64.b64encode(b"# Netscape HTTP Cookie File\n\n").decode()
+    target = tmp_path / "cookies.txt"
+    _set_cookies(monkeypatch, payload, target)
+
+    with caplog.at_level("ERROR"):
+        assert w.prepare_youtube_cookies() is False
+
+    assert not target.exists()
+    assert "contains no cookie rows" in caplog.text
 
 
 # ---------------------------------------------------------------------------

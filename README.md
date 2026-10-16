@@ -298,6 +298,54 @@ Rules that this option follows:
   different IP. Treat the value as a secret and re-export it if the session ends
   (logging out of that browser invalidates it).
 
+The value is validated before it is used, so a mistake can never break downloads:
+
+* a value that is not base64, does not start with the `# Netscape HTTP Cookie File`
+  header line, or contains no cookie rows is **ignored** (logged as
+  `Ignoring INSTAGRAM_COOKIES_B64: ...`) and Instagram simply stays on anonymous
+  access. The same applies to `YOUTUBE_COOKIES_B64`. This matters because yt-dlp
+  refuses such a file on *every* download
+  (`Cookies file must be Netscape formatted, not JSON`), so passing it on would
+  break every site instead of one;
+* a valid file without an `instagram.com` **`sessionid`** cookie logs
+  `Instagram cookies contain no instagram.com 'sessionid' cookie ...` — that cookie
+  is the only thing that switches Instagram to the logged-in path, so a file
+  without it changes nothing;
+* a valid file *with* it logs
+  `Instagram cookies include an instagram.com sessionid cookie; the logged-in
+  extraction path will be used`, and yt-dlp adds `Found Instagram account cookies`;
+* if Instagram itself rejects the session, the log gets
+  `Instagram rejected the configured cookies ... INSTAGRAM_COOKIES_B64 is expired`
+  once — re-export the cookies or unset the variable.
+
+#### Verifying it on Render
+
+After setting the variable and redeploying, look at the service log once the bot
+has handled an Instagram link:
+
+| Log line | Meaning |
+|----------|---------|
+| `Instagram cookies include an instagram.com sessionid cookie` | the export is usable; Instagram requests now go through the logged-in path |
+| `Instagram cookies contain no instagram.com 'sessionid' cookie` | wrong or logged-out export — re-export while logged in |
+| `Ignoring INSTAGRAM_COOKIES_B64: ...` | the value is not a Netscape cookies.txt; downloads continue anonymously |
+| `Instagram rejected the configured cookies` | the session is expired or was logged out; export a fresh one |
+| `Rate limit (HTTP 429) while downloading from www.instagram.com` | Instagram is limiting this server's IP for that request |
+
+`INSTAGRAM_COOKIES_FILE` (default `/tmp/instagram_cookies.txt`) is **written by the
+bot from the environment variable on first use** — never upload a cookies file to
+the host. On Render that is exactly the right setup: `/tmp` is writable and the
+file is re-created after every restart/redeploy, so no persistent disk is needed
+(and a manually uploaded file would not survive a redeploy anyway).
+
+#### Removing the cookies again
+
+Unset `INSTAGRAM_COOKIES_B64` in the Render dashboard and redeploy; Instagram
+downloads fall back to anonymous access with nothing else changed. Then revoke the
+session you exported: Instagram → *Settings* → *Accounts Center* → *Password and
+security* → *Where you're logged in* → log out that browser. Rotating is cheap and
+mandatory if the value could have been exposed anywhere (a screenshot, a ticket, a
+chat, a public repository) — treat it exactly like a password.
+
 ## Payments
 
 ### Telegram Stars (international)

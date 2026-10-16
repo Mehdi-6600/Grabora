@@ -3,6 +3,28 @@
 ## [Unreleased]
 
 ### Fixed
+- **A cookie value yt-dlp cannot load used to break *every* download.** `_decode_cookie_blob()` wrote the decoded
+  blob to disk even when it was not a Netscape cookies.txt (a JSON export, an HTML page, a header-only file),
+  logging only a warning. Verified against the installed yt-dlp: `YoutubeDL.cookiejar` then raises
+  `DownloadError: Cookies file must be Netscape formatted, not JSON` on **every** download that uses that file —
+  i.e. one mistyped secret turned "anonymous access may be rate-limited" into "nothing downloads at all", with
+  users seeing only the generic failure text. The file is now validated first (Netscape header line + at least one
+  cookie row, the same rules yt-dlp's loader applies) and an unusable value is **ignored instead of written**, so
+  downloads keep running without cookies — exactly the behaviour before the option existed. Applies to
+  `YOUTUBE_COOKIES_B64` as well.
+- **An Instagram cookie without a `sessionid` was silently useless.** Instagram's extractor only switches to the
+  logged-in path when an `instagram.com` `sessionid` cookie exists
+  (`yt_dlp/extractor/instagram.py`: `_AUTH_COOKIE_NAME = 'sessionid'`, `_is_logged_in`). The decoded file is now
+  inspected (domains and cookie *names* only — values are never read or logged) and the state is logged:
+  `Instagram cookies include an instagram.com sessionid cookie ...` or a warning that Instagram will stay
+  anonymous. A cookie file that is loadable but has no Instagram session is still used (harmless, other cookies
+  may help) — only the log line changes.
+- **An expired Instagram session was indistinguishable from having no cookies.** When Instagram rejects the
+  configured cookies, yt-dlp warns `The provided Instagram account cookies are no longer valid` and continues
+  anonymously, so the owner only saw the generic 429. That warning is now turned into one actionable
+  `ERROR` per process: `Instagram rejected the configured cookies (...) INSTAGRAM_COOKIES_B64 is expired ...`.
+
+### Fixed
 - **Instagram downloads failed with `HTTP Error 429: Too Many Requests` and the bot answered with a generic
   "download failed".** Three verified causes, all in our code:
   *(a)* `bot/handlers/download.py` retried **every** exception immediately once (`for attempt in range(2)`,
@@ -35,7 +57,12 @@
   limit. See the README section "Instagram rate limits (HTTP 429)".
 - `downloader.ytdlp_wrapper.MediaTooLargeError`, plus `is_rate_limited()`, `is_instagram_url()` and
   `supports_size_probe()` helpers, and `download(..., max_filesize_bytes=...)`.
-- `tests/test_instagram_429.py` (26 tests, all mocked — no request is ever sent to Instagram): detection through
+- Cookie-file validation tests (`tests/test_instagram_429.py`, `tests/test_youtube_cookies.py`) covering: JSON/HTML/
+  header-only/whitespace/headerless payloads refused and never written; a valid dummy cookie accepted and loadable by
+  **real** yt-dlp (`yt_dlp.cookies.load_cookies`, no network); `#HttpOnly_` rows recognised; a file without
+  `sessionid` warning; the expired-session report firing once per process; and cookie values/base64 never appearing
+  in logs.
+- `tests/test_instagram_429.py` (39 tests, all mocked — no request is ever sent to Instagram): detection through
   wrapped exceptions, no-retry on 429, retry kept for other errors, probe skipped for Instagram but kept
   elsewhere, tier limits passed to yt-dlp, cookie scoping/optionality/log-safety, temp-file cleanup, and the
   `max_filesize` output detection.

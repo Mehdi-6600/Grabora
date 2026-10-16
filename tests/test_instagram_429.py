@@ -223,6 +223,33 @@ def test_instagram_429_message_is_persian_and_leaks_nothing():
         assert leaked not in lowered
 
 
+def test_detection_matches_the_exact_upstream_rate_limit_exception():
+    """Use yt-dlp's own extractor to build the real production exception.
+
+    ``instagram.py`` raises this through ``raise_login_required()`` for the
+    anonymous-limit case, so the message text (including the login hint) is
+    produced by yt-dlp itself rather than hand-written here. If upstream
+    rewords it, this test fails loudly instead of the bot silently retrying.
+    """
+    from yt_dlp.extractor.instagram import InstagramIE
+
+    with pytest.raises(ExtractorError) as excinfo:
+        InstagramIE().raise_login_required(
+            "The webpage request was redirected to the login page. "
+            "You have exceeded the rate-limit for accessing posts anonymously"
+        )
+    exc = excinfo.value
+
+    assert "rate-limit for accessing posts" in str(exc)  # the wording we match on
+    assert w.is_rate_limited(exc) is True
+    assert w._is_bot_check(exc) is False  # must not enter the YouTube ladder
+    assert _is_retryable(exc) is False
+    assert (
+        _failure_message(exc, INSTAGRAM_URL, User(user_id=1, tier="free"))
+        == INSTAGRAM_RATE_LIMITED
+    )
+
+
 def test_non_instagram_rate_limit_uses_the_generic_message():
     inner = HTTPError("https://example.com/x", 429, "Too Many Requests", {}, None)  # type: ignore[arg-type]
     exc = ExtractorError("Unable to download webpage: HTTP Error 429", cause=inner)
@@ -472,6 +499,12 @@ def test_instagram_cookies_are_used_for_instagram_only(monkeypatch, tmp_path):
 
 
 def test_instagram_cookie_content_is_never_logged(monkeypatch, tmp_path, caplog):
+    """Cookie *values* must never reach the logs.
+
+    The cookie *name* (``sessionid``) is intentionally part of the diagnostic
+    message: it is a public, well-known name — not a credential — and it is what
+    tells the owner their export actually carries a session.
+    """
     monkeypatch.setattr(
         w, "INSTAGRAM_COOKIES_B64", base64.b64encode(COOKIE_TEXT.encode()).decode(), raising=False
     )
@@ -482,7 +515,8 @@ def test_instagram_cookie_content_is_never_logged(monkeypatch, tmp_path, caplog)
         w._apply_cookies({}, INSTAGRAM_URL)
 
     assert "test-session-value" not in caplog.text
-    assert "sessionid" not in caplog.text
+    # the base64 blob must not be echoed either
+    assert base64.b64encode(COOKIE_TEXT.encode()).decode()[:24] not in caplog.text
 
 
 def test_invalid_instagram_cookie_base64_is_non_fatal(monkeypatch, tmp_path, caplog):
@@ -509,6 +543,150 @@ def test_instagram_cookies_do_not_change_behaviour_when_unset(monkeypatch, tmp_p
     opts: dict = {}
     w._apply_cookies(opts, INSTAGRAM_URL)
     assert opts["cookiefile"] == str(yt)  # exactly what happened before this change
+
+
+# ---------------------------------------------------------------------------
+# 5b. A cookie value yt-dlp cannot load must never break downloads
+#     (verified: passing such a file makes every download raise CookieLoadError
+#     "Cookies file must be Netscape formatted, not JSON").
+# ---------------------------------------------------------------------------
+
+BAD_COOKIE_PAYLOADS = {
+    "json-export": '{"cookies": [{"domain": ".instagram.com", "name": "sessionid"}]}',
+    "html-page": "<!DOCTYPE html><html><body>login</body></html>",
+    "header-only": "# Netscape HTTP Cookie File\n\n",
+    "whitespace-only": "   \n\n",
+    "no-header-but-tabbed": ".instagram.com\tTRUE\t/\tTRUE\t0\tsessionid\tDUMMY\n",
+}
+
+
+def test_blank_instagram_cookie_value_means_unset(monkeypatch, tmp_path, caplog):
+    """An empty variable is "not configured", not an error (Render sends "")."""
+    target = tmp_path / "ig.txt"
+    monkeypatch.setattr(w, "INSTAGRAM_COOKIES_B64", "", raising=False)
+    monkeypatch.setattr(w, "INSTAGRAM_COOKIES_FILE", str(target), raising=False)
+    w.reset_cookie_cache()
+
+    with caplog.at_level(logging.DEBUG):
+        opts: dict = {}
+        w._apply_cookies(opts, INSTAGRAM_URL)
+
+    assert not target.exists()
+    assert "cookiefile" not in opts
+    assert "not set" in caplog.text
+
+
+@pytest.mark.parametrize("name,payload", sorted(BAD_COOKIE_PAYLOADS.items()))
+def test_unloadable_cookie_blob_is_refused_not_written(name, payload, monkeypatch, tmp_path, caplog):
+    target = tmp_path / f"{name}.txt"
+    monkeypatch.setattr(w, "INSTAGRAM_COOKIES_B64", base64.b64encode(payload.encode()).decode(), raising=False)
+    monkeypatch.setattr(w, "INSTAGRAM_COOKIES_FILE", str(target), raising=False)
+    w.reset_cookie_cache()
+
+    with caplog.at_level(logging.DEBUG):
+        opts: dict = {}
+        w._apply_cookies(opts, INSTAGRAM_URL)
+
+    assert not target.exists(), f"{name}: an unloadable cookie file was written"
+    assert "cookiefile" not in opts, f"{name}: an unloadable file was passed to yt-dlp"
+    assert "Ignoring INSTAGRAM_COOKIES_B64" in caplog.text
+    assert "DUMMY" not in caplog.text  # never echo any part of the value
+
+
+def test_refused_cookie_blob_does_not_break_real_ytdlp_loading(tmp_path):
+    """Regression: the file we write must be loadable by yt-dlp's own loader."""
+    from yt_dlp.cookies import load_cookies
+
+    # A file as written by the fixed code path (cookie ignored => nothing written).
+    missing = tmp_path / "never-written.txt"
+    jar = load_cookies(str(missing), None, None)
+    assert len(list(jar)) == 0  # missing file -> anonymous, no exception
+
+    # The old behaviour wrote the JSON blob, and yt-dlp refuses to load it.
+    json_file = tmp_path / "old-behaviour.txt"
+    json_file.write_text(BAD_COOKIE_PAYLOADS["json-export"])
+    with pytest.raises(Exception) as excinfo:
+        load_cookies(str(json_file), None, None)
+    assert "cookies" in str(excinfo.value).lower()
+
+
+def test_valid_cookie_blob_is_loadable_by_real_ytdlp(monkeypatch, tmp_path):
+    from yt_dlp.cookies import load_cookies
+
+    target = tmp_path / "ig.txt"
+    monkeypatch.setattr(w, "INSTAGRAM_COOKIES_B64", base64.b64encode(COOKIE_TEXT.encode()).decode(), raising=False)
+    monkeypatch.setattr(w, "INSTAGRAM_COOKIES_FILE", str(target), raising=False)
+    w.reset_cookie_cache()
+
+    opts: dict = {}
+    w._apply_cookies(opts, INSTAGRAM_URL)
+
+    assert opts["cookiefile"] == str(target)
+    jar = load_cookies(str(target), None, None)
+    names = {cookie.name for cookie in jar}
+    assert "sessionid" in names  # the cookie Instagram's extractor looks for
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_http_only_sessionid_cookie_is_recognised(monkeypatch, tmp_path, caplog):
+    """Browser exports mark session cookies as #HttpOnly_ — still a session."""
+    payload = (
+        "# Netscape HTTP Cookie File\n\n"
+        "#HttpOnly_.instagram.com\tTRUE\t/\tTRUE\t0\tsessionid\tDUMMY\n"
+    )
+    monkeypatch.setattr(w, "INSTAGRAM_COOKIES_B64", base64.b64encode(payload.encode()).decode(), raising=False)
+    monkeypatch.setattr(w, "INSTAGRAM_COOKIES_FILE", str(tmp_path / "ig.txt"), raising=False)
+    w.reset_cookie_cache()
+
+    with caplog.at_level(logging.INFO):
+        w._apply_cookies({}, INSTAGRAM_URL)
+
+    assert "the logged-in extraction path will be used" in caplog.text
+
+
+def test_cookie_file_without_instagram_session_warns_loudly(monkeypatch, tmp_path, caplog):
+    """A loadable file that cannot log Instagram in must say so, not look healthy."""
+    payload = "# Netscape HTTP Cookie File\n\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tDUMMY\n"
+    target = tmp_path / "ig.txt"
+    monkeypatch.setattr(w, "INSTAGRAM_COOKIES_B64", base64.b64encode(payload.encode()).decode(), raising=False)
+    monkeypatch.setattr(w, "INSTAGRAM_COOKIES_FILE", str(target), raising=False)
+    w.reset_cookie_cache()
+
+    with caplog.at_level(logging.DEBUG):
+        w._apply_cookies({}, INSTAGRAM_URL)
+
+    assert target.exists()  # the file itself is fine and harmless
+    assert "no instagram.com 'sessionid' cookie" in caplog.text
+    assert "DUMMY" not in caplog.text
+
+
+def test_expired_instagram_session_is_reported_once(monkeypatch, caplog):
+    """yt-dlp's 'cookies are no longer valid' must become an actionable log line."""
+    w.reset_cookie_cache()
+    messages = w.YdlMessages()
+    messages.warning("The provided Instagram account cookies are no longer valid")
+
+    assert messages.instagram_cookies_rejected() is True
+    with caplog.at_level(logging.ERROR):
+        w._report_rejected_instagram_cookies(messages)
+        first = caplog.text
+        caplog.clear()
+        w._report_rejected_instagram_cookies(messages)  # one report per process
+    assert "INSTAGRAM_COOKIES_B64 is expired" in first
+    assert caplog.text == ""
+
+    w.reset_cookie_cache()  # tests (and a fresh process) start clean again
+    with caplog.at_level(logging.ERROR):
+        w._report_rejected_instagram_cookies(messages)
+    assert "INSTAGRAM_COOKIES_B64 is expired" in caplog.text
+
+
+def test_unrelated_ytdlp_output_is_not_mistaken_for_a_rejected_cookie():
+    messages = w.YdlMessages()
+    messages.warning("Some other warning about posts")
+
+    assert messages.instagram_cookies_rejected() is False
+    w._report_rejected_instagram_cookies(messages)  # must be a no-op, not a crash
 
 
 def test_config_exposes_optional_instagram_cookie_settings():
