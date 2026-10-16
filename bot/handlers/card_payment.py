@@ -21,9 +21,9 @@ from bot.utils.messages import (
     TRACKING_RECEIVED,
     tier_label,
 )
-from config import ADMIN_IDS, PACKAGE_PRICES_IRR
+from config import ADMIN_IDS, PACKAGE_KEYS
 from database.models import Payment, User
-from database.queries import create_manual_payment, get_setting
+from database.queries import create_manual_payment, get_price, get_setting
 
 logger = logging.getLogger(__name__)
 
@@ -115,10 +115,11 @@ async def on_card_payment(callback: CallbackQuery, state: FSMContext, db_user: U
     target = parts[2]
     tier_key = "addon_2k" if target in {"addon", "addon_2k"} else target
 
-    amount = PACKAGE_PRICES_IRR.get(tier_key)
-    if amount is None:
+    if tier_key not in PACKAGE_KEYS:
         await callback.answer(PAYMENT_COMING_SOON, show_alert=True)
         return
+    # Prices are admin-editable (see the /prices command), so read them live.
+    amount, _stars = await get_price(tier_key)
 
     from database.queries import has_pending_manual
 

@@ -15,7 +15,7 @@
 - **Subscription tiers**: free / monthly / quarterly / yearly + optional 2K addon.
 - **Daily download limits** with automatic daily reset.
 - **Payments**: Telegram Stars (via `neonpay`, automatic activation) and card-to-card in IRR (manual admin approval).
-- **Admin tools**: `/stats`, `/broadcast`, `/ban`, `/unban`, `/give`, `/revoke`, `/payments`, `/pending`, `/card`, `/reject`.
+- **Admin tools**: `/stats`, `/broadcast`, `/ban`, `/unban`, `/give`, `/revoke`, `/payments`, `/pending`, `/card`, `/prices`, `/reject`.
 - **Queue & throttling**: global concurrency 3, per-user 1, 1 msg/2s throttle.
 - **Scheduler**: temp-file cleanup, daily counter reset, subscription expiry checks & reminders.
 - **Logging**: rotating file handler (5 MB × 3 backups), domain-only URLs.
@@ -35,7 +35,7 @@ YouTube, Instagram, Twitter/X, Facebook, TikTok, Vimeo, SoundCloud, and 1800+ si
 | Yearly | 365 days | Unlimited | 400,000 | 400 |
 | 2K Addon | 30 days | — | 30,000 | 30 |
 
-IRR amounts are displayed with thousand separators. The card-to-card flow reads prices from `PACKAGE_PRICES_IRR`; Stars invoices use `PACKAGE_PRICES_STARS`.
+IRR amounts are displayed with thousand separators. The table above shows the **defaults** seeded from `PACKAGE_PRICES_IRR` / `PACKAGE_PRICES_STARS` on first start: prices live in the `prices` table, are read live by every payment path (card-to-card and Stars invoices), and can be changed at runtime with the admin `/prices` command without a restart. Existing rows are never overwritten by the seeding (`INSERT OR IGNORE`), so admin edits survive restarts.
 
 ## Access matrix
 
@@ -70,7 +70,8 @@ Telegram ──► Aiogram Dispatcher
                 │
                 ├── Database (SQLite / PostgreSQL-ready)
                 │       ├── users, payments, download_logs
-                │       └── settings (card_number, card_holder — editable via /card)
+                │       ├── settings (card_number, card_holder — editable via /card)
+                │       └── prices (package_key → IRR + Stars — editable via /prices)
                 │
                 └── Scheduler (APScheduler)
                         ├── temp-file cleanup (hourly)
@@ -255,7 +256,13 @@ Paid overseas users use Stars; Iranian users pay by card and an admin approves m
 | `/pending` | List every `pending_manual` payment, each as its own message with the approval keyboard |
 | `/card` | Show the current card number and holder from `settings` |
 | `/card <number> \| <holder>` | Update the card details used in the instructions |
+| `/prices` | Show the current price of every package (IRR + Stars) |
+| `/prices <package> <irr> <stars>` | Change a package price at runtime, e.g. `/prices monthly 80000 80` |
 | `/reject <payment_id>` | Reject a pending payment and notify the user |
+
+> Package keys are `monthly`, `quarterly`, `yearly` and `addon_2k`. Prices are stored in the database and read
+> live by both payment flows, so a change applies to the next invoice without a restart. Telegram Stars prices
+> must stay within the range neonpay accepts (1–2500); a value outside it is rejected with an explanation.
 
 ## Deployment (systemd)
 

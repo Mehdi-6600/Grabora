@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
 import aiosqlite
 
-from config import DATABASE_PATH
+from config import (
+    DATABASE_PATH,
+    PACKAGE_KEYS,
+    PACKAGE_PRICES_IRR,
+    PACKAGE_PRICES_STARS,
+)
 from database.models import PaymentStatus
 
 logger = logging.getLogger(__name__)
@@ -74,6 +80,16 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Admin-editable package prices. config.PACKAGE_PRICES_* are only seed
+-- defaults; rows already present are never overwritten, so admin changes
+-- survive restarts.
+CREATE TABLE IF NOT EXISTS prices (
+    package_key TEXT PRIMARY KEY,
+    price_irr INTEGER NOT NULL,
+    price_stars INTEGER NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
 """
 
 _connection: aiosqlite.Connection | None = None
@@ -118,8 +134,34 @@ async def init_db() -> None:
             "Could not create idx_payments_tracking_unique: duplicate verified "
             "tracking numbers already exist in the database"
         )
+    await _seed_prices()
     await _connection.commit()
     logger.info("Database initialized at %s", db_path)
+
+
+async def _seed_prices() -> None:
+    """Insert default prices for packages that have no row yet.
+
+    INSERT OR IGNORE, so prices an admin changed with /prices are preserved.
+    """
+    if _connection is None:
+        return
+    now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    seeded = 0
+    for package_key in PACKAGE_KEYS:
+        irr = PACKAGE_PRICES_IRR.get(package_key)
+        stars = PACKAGE_PRICES_STARS.get(package_key)
+        if irr is None or stars is None:
+            logger.warning("No default price configured for %s; skipping seed", package_key)
+            continue
+        cursor = await _connection.execute(
+            "INSERT OR IGNORE INTO prices (package_key, price_irr, price_stars, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (package_key, int(irr), int(stars), now),
+        )
+        seeded += cursor.rowcount or 0
+    if seeded:
+        logger.info("Seeded %d default price(s)", seeded)
 
 
 async def close_db() -> None:
