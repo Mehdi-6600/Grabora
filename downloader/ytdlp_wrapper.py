@@ -178,22 +178,91 @@ def _clean_b64(value: str) -> str:
     return "".join(value.split())
 
 
-def _looks_like_cookiefile(raw: bytes) -> bool:
-    head = raw[:4096].decode("utf-8", errors="ignore")
-    return "Netscape HTTP Cookie File" in head or "\t" in head
+# yt-dlp loads a cookies file with http.cookiejar.MozillaCookieJar, whose
+# magic_re requires this marker on the FIRST line. A file without it is not
+# "maybe wrong": yt-dlp raises (DownloadError: Cookies file must be Netscape
+# formatted, ...) on every download that uses it, so it must never be written.
+_NETSCAPE_HEADER = "Netscape HTTP Cookie File"
+_HTTPONLY_PREFIX = "#HttpOnly_"
+_COOKIE_ROW_FIELDS = 7
 
 
-def _decode_cookie_blob(b64_value: str, env_name: str, target: Path, label: str) -> Path | None:
-    """Decode a base64 cookies.txt, write it 0600 and return its path.
+def _parse_cookie_row(line: str) -> tuple[str, str] | None:
+    """Return ``(domain, cookie name)`` for one Netscape row, else ``None``.
+
+    Mirrors ``YoutubeDLCookieJar.load()``'s field handling (``#HttpOnly_``
+    prefix, ``#`` comments, exactly 7 tab-separated fields). Only the domain and
+    the cookie *name* are returned — cookie values are never read or logged.
+    """
+    line = line.rstrip("\r\n")
+    if line.startswith(_HTTPONLY_PREFIX):
+        line = line[len(_HTTPONLY_PREFIX) :]
+    elif line.startswith("#") or not line.strip():
+        return None
+    fields = line.split("\t")
+    if len(fields) != _COOKIE_ROW_FIELDS:
+        return None
+    return fields[0].strip().lower(), fields[5].strip()
+
+
+def _inspect_cookiefile(raw: bytes) -> tuple[str | None, list[tuple[str, str]]]:
+    """Return ``(problem, rows)``; ``problem`` is why yt-dlp cannot use the file.
+
+    ``rows`` holds ``(domain, cookie name)`` pairs for the caller's own sanity
+    checks. No cookie value ever leaves this function.
+    """
+    text = raw[:1_000_000].decode("utf-8", errors="ignore")
+    lines = text.splitlines()
+    if not lines or _NETSCAPE_HEADER not in lines[0]:
+        return (
+            "it does not start with the '# Netscape HTTP Cookie File' header line "
+            "(yt-dlp only reads Netscape-format cookies.txt files)",
+            [],
+        )
+    rows = [row for row in (_parse_cookie_row(line) for line in lines[1:]) if row is not None]
+    if not rows:
+        return "it contains no cookie rows", []
+    return None, rows
+
+
+def _has_instagram_session(rows: list[tuple[str, str]]) -> bool:
+    """True when the file carries the cookie Instagram's extractor looks for.
+
+    ``instagram.py`` switches to the logged-in request path only when a
+    ``sessionid`` cookie exists for instagram.com.
+    """
+    return any("instagram.com" in domain and name == "sessionid" for domain, name in rows)
+
+
+def _decode_cookie_blob(
+    b64_value: str, env_name: str, target: Path, label: str, *, instagram: bool = False
+) -> Path | None:
+    """Decode a base64 cookies.txt, validate it, write it 0600, return its path.
 
     Cookie content is never logged — only the byte count of what was written.
     The env var name is used in messages so the owner knows which secret to fix.
+
+    An unusable value is ignored instead of written: handing yt-dlp a file it
+    cannot parse makes *every* download fail (``CookieLoadError``), whereas
+    ignoring it keeps downloads running with anonymous access, which is exactly
+    the behaviour before cookies were configured.
     """
     try:
         raw = base64.b64decode(_clean_b64(b64_value), validate=False)
     except (binascii.Error, ValueError) as exc:
         # Never log the value itself — it grants account access.
         logger.error("%s is not valid base64: %s", env_name, exc)
+        return None
+
+    problem, rows = _inspect_cookiefile(raw)
+    if problem is not None:
+        logger.error(
+            "Ignoring %s: %s. It is not written, so %s downloads keep working "
+            "without it (passing it on would make every download fail)",
+            env_name,
+            problem,
+            label,
+        )
         return None
 
     try:
@@ -204,13 +273,19 @@ def _decode_cookie_blob(b64_value: str, env_name: str, target: Path, label: str)
         logger.error("Could not write cookies file %s: %s", target, exc)
         return None
 
-    if not _looks_like_cookiefile(raw):
-        logger.warning(
-            "Decoded %s does not look like a Netscape "
-            "cookies.txt (expected the 'Netscape HTTP Cookie File' header); "
-            "yt-dlp may reject it",
-            env_name,
-        )
+    if instagram:
+        if _has_instagram_session(rows):
+            logger.info(
+                "Instagram cookies include an instagram.com sessionid cookie; "
+                "the logged-in extraction path will be used",
+            )
+        else:
+            logger.warning(
+                "Instagram cookies contain no instagram.com 'sessionid' cookie, so "
+                "Instagram will stay on anonymous access (the path that answers "
+                "HTTP 429). Export the cookies while logged in, not from a "
+                "logged-out or private window",
+            )
     logger.info("%s cookies written to %s (%d bytes)", label, target, len(raw))
     return target
 
@@ -258,6 +333,7 @@ def _resolve_instagram_cookie_file() -> Path | None:
             "INSTAGRAM_COOKIES_B64",
             Path(INSTAGRAM_COOKIES_FILE),
             "Instagram",
+            instagram=True,
         )
         return _instagram_cookie_file
 
@@ -271,7 +347,9 @@ def reset_cookie_cache() -> None:
     """Forget the cached cookies files (used by tests)."""
     global _cookie_file, _cookie_resolved
     global _instagram_cookie_file, _instagram_cookie_resolved
+    global _instagram_cookies_rejected_reported
     with _COOKIE_LOCK:
+        _instagram_cookies_rejected_reported = False
         _cookie_file = None
         _cookie_resolved = False
         _instagram_cookie_file = None
@@ -322,6 +400,13 @@ def _apply_clients(opts: dict[str, Any], clients: tuple[str, ...] | None) -> Non
 # yt-dlp's own wording when it aborts because of ``max_filesize``.
 _MAX_FILESIZE_MARKER = "max-filesize"
 
+# Instagram's extractor says this (and clears the cookie) when the configured
+# session is no longer valid: https://github.com/yt-dlp/yt-dlp (extractor/instagram.py).
+_INSTAGRAM_COOKIES_REJECTED_MARKER = "instagram account cookies are no longer valid"
+
+# One report per process: a stale secret must not flood the log on every attempt.
+_instagram_cookies_rejected_reported = False
+
 
 class YdlMessages:
     """Captures yt-dlp output so nothing is lost and nothing is spammed.
@@ -361,6 +446,30 @@ class YdlMessages:
 
     def exceeded_max_filesize(self) -> bool:
         return _MAX_FILESIZE_MARKER in self.text.lower()
+
+    def instagram_cookies_rejected(self) -> bool:
+        """True if Instagram refused the configured session cookie."""
+        return _INSTAGRAM_COOKIES_REJECTED_MARKER in self.text.lower()
+
+
+def _report_rejected_instagram_cookies(messages: YdlMessages) -> None:
+    """Tell the owner, once per process, that the Instagram cookie is stale.
+
+    Without this the only sign of an expired secret is the generic outcome
+    (anonymous access -> HTTP 429), which looks identical to not having
+    configured cookies at all.
+    """
+    global _instagram_cookies_rejected_reported
+    if _instagram_cookies_rejected_reported or not messages.instagram_cookies_rejected():
+        return
+    _instagram_cookies_rejected_reported = True
+    logger.error(
+        "Instagram rejected the configured cookies ('The provided Instagram account "
+        "cookies are no longer valid'): INSTAGRAM_COOKIES_B64 is expired, was logged "
+        "out, or came from a different account/session. Export a fresh cookies.txt "
+        "from a browser that is still logged in, or unset the variable. Instagram "
+        "downloads currently use anonymous access, which is rate-limited.",
+    )
 
 
 def _base_opts(output_dir: Path, messages: YdlMessages | None = None) -> dict[str, Any]:
@@ -499,6 +608,9 @@ def _download(
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, MediaTooLargeError):
                 raise
+            # Surface an expired Instagram session, which otherwise looks
+            # exactly like having no cookies at all.
+            _report_rejected_instagram_cookies(messages)
             is_last = index == len(attempts) - 1
             if is_last or not _is_bot_check(exc):
                 raise
