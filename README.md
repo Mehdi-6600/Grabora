@@ -27,15 +27,15 @@ YouTube, Instagram, Twitter/X, Facebook, TikTok, Vimeo, SoundCloud, and 1800+ si
 
 ## Pricing
 
-| Package | Duration | Daily limit | IRR | Stars |
+| Package | Duration | Daily limit | IRR (Rial) | Stars |
 |---|---|---|---|---|
 | Free | — | 3 | 0 | 0 |
-| Monthly | 30 days | 30 | 50,000 | 50 |
-| Quarterly | 90 days | 50 | 120,000 | 120 |
-| Yearly | 365 days | Unlimited | 400,000 | 400 |
-| 2K Addon | 30 days | — | 30,000 | 30 |
+| Monthly | 30 days | 30 | 800,000 | 80 |
+| Quarterly | 90 days | 50 | 2,100,000 | 210 |
+| Yearly | 365 days | Unlimited | 7,200,000 | 720 |
+| 2K Addon | 30 days | — | 500,000 | 50 |
 
-IRR amounts are displayed with thousand separators. The table above shows the **defaults** seeded from `PACKAGE_PRICES_IRR` / `PACKAGE_PRICES_STARS` on first start: prices live in the `prices` table, are read live by every payment path (card-to-card and Stars invoices), and can be changed at runtime with the admin `/prices` command without a restart. Existing rows are never overwritten by the seeding (`INSERT OR IGNORE`), so admin edits survive restarts.
+IRR amounts are displayed with thousand separators (800,000 IRR = 80,000 Toman). The table above shows the **defaults** seeded from `PACKAGE_PRICES_IRR` / `PACKAGE_PRICES_STARS` on first start: prices live in the `prices` table, are read live by every payment path (card-to-card and Stars invoices), and can be changed at runtime with the admin `/prices` command without a restart. Existing rows are never overwritten by the seeding (`INSERT OR IGNORE`), so admin edits survive restarts.
 
 ## Access matrix
 

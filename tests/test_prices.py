@@ -288,7 +288,7 @@ async def test_card_payment_uses_the_stored_price(db, admin_user):
     from database.models import User
     from database.queries import set_setting
 
-    await set_price("monthly", 80000, 80)
+    await set_price("monthly", 123_456, 123)
     await set_setting("card_number", "6037-0000-0000-0000")
     await set_setting("card_holder", "Grabora")
 
@@ -325,8 +325,10 @@ async def test_card_payment_uses_the_stored_price(db, admin_user):
 
     assert callback.message.sent, "card instructions were not sent"
     text = callback.message.sent[0][0]
-    assert "80,000" in text
-    assert "50,000" not in text
+    assert "123,456" in text
+    # ...and not the config seed (every default is a different number).
+    for key in PACKAGE_KEYS:
+        assert f"{PACKAGE_PRICES_IRR[key]:,}" not in text
 
 
 @pytest.mark.asyncio
@@ -399,9 +401,15 @@ async def test_refresh_stars_prices_without_neonpay_is_a_noop(db):
 
 @pytest.mark.asyncio
 async def test_config_dicts_are_not_mutated_by_price_changes(db):
-    """config.PACKAGE_PRICES_* stay pristine seed defaults."""
+    """config.PACKAGE_PRICES_* stay pristine seed defaults.
+
+    Snapshotted before the change so the test never encodes a price itself.
+    """
+    before = {key: (PACKAGE_PRICES_IRR[key], PACKAGE_PRICES_STARS[key]) for key in PACKAGE_KEYS}
+
     await set_price("monthly", 123456, 123)
 
-    assert PACKAGE_PRICES_IRR["monthly"] == 50000
-    assert PACKAGE_PRICES_STARS["monthly"] == 50
-    assert config.PACKAGE_PRICES_IRR["monthly"] == 50000
+    after = {key: (PACKAGE_PRICES_IRR[key], PACKAGE_PRICES_STARS[key]) for key in PACKAGE_KEYS}
+    assert after == before
+    assert config.PACKAGE_PRICES_IRR["monthly"] == before["monthly"][0]
+    assert config.PACKAGE_PRICES_STARS["monthly"] == before["monthly"][1]

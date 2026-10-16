@@ -15,6 +15,9 @@
 - README section "YouTube cookies (cloud hosting)" with cookie export/base64 instructions and guidance on expiry and secret handling.
 
 ### Changed
+- **Default package prices updated**: monthly 800,000 IRR / 80 Stars, quarterly 2,100,000 IRR / 210 Stars,
+  yearly 7,200,000 IRR / 720 Stars, 2K addon 500,000 IRR / 50 Stars (i.e. 80,000 / 210,000 / 720,000 / 50,000
+  Toman). These are seed values: a database that already has a `prices` row keeps its stored value.
 - All payment code (card-to-card instructions, Stars stages, subscription views) now reads prices from the
   database instead of the `config` dictionaries; `PACKAGE_PRICES_IRR` / `PACKAGE_PRICES_STARS` are seed-only
   defaults.
