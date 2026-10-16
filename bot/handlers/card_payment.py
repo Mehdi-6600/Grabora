@@ -11,6 +11,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from bot.keyboards.inline import admin_approval_keyboard
+from bot.utils.admin_notify import escape_markdown, sanitize_code_span, send_to_admins
 from bot.utils.messages import (
     ADMIN_NEW_PAYMENT,
     CARD_PAYMENT_INSTRUCTIONS,
@@ -21,7 +22,7 @@ from bot.utils.messages import (
     TRACKING_RECEIVED,
     tier_label,
 )
-from config import ADMIN_IDS, PACKAGE_KEYS
+from config import PACKAGE_KEYS
 from database.models import Payment, User
 from database.queries import create_manual_payment, get_price, get_setting
 
@@ -66,18 +67,30 @@ def format_amount(amount: int) -> str:
     return f"{amount:,}"
 
 
-def build_admin_payment_text(payment: Payment, user: User | None) -> str:
-    """Admin-facing summary of a manual payment (with approval buttons)."""
+def build_admin_payment_text(
+    payment: Payment, user: User | None, markdown: bool = True
+) -> str:
+    """Admin-facing summary of a manual payment (with approval buttons).
+
+    ``markdown=True`` escapes the user-controlled fields (name, username) so
+    Telegram's parser cannot reject the message — an unbalanced ``_`` in a name
+    used to make the whole notification undeliverable. Pass ``markdown=False``
+    for a body that will be sent or edited without ``parse_mode``.
+    """
     username = (user.username if user and user.username else "—")
     full_name = (user.full_name if user and user.full_name else "—")
     created = payment.created_at.strftime("%Y-%m-%d %H:%M") if payment.created_at else "—"
+    if markdown:
+        username = escape_markdown(username)
+        full_name = escape_markdown(full_name)
     return ADMIN_NEW_PAYMENT.format(
         full_name=full_name,
         username=username,
         user_id=payment.user_id,
-        tier_label=tier_label(payment.tier),
+        tier_label=escape_markdown(tier_label(payment.tier)) if markdown else tier_label(payment.tier),
         amount=format_amount(payment.amount),
-        tracking_number=payment.tracking_number or "—",
+        # Inside a `code span`, so backticks must go rather than be escaped.
+        tracking_number=sanitize_code_span(payment.tracking_number or "—"),
         created_at=created,
         payment_id=payment.id,
     )
@@ -184,17 +197,36 @@ async def on_tracking_number(message: Message, state: FSMContext, db_user: User)
     from database.queries import get_user as _get_user
 
     user = await _get_user(db_user.user_id) or db_user
-    text = build_admin_payment_text(payment, user)
-    for admin_id in ADMIN_IDS:
-        try:
-            await message.bot.send_message(
-                admin_id,
-                text,
-                parse_mode="Markdown",
-                reply_markup=admin_approval_keyboard(payment),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to notify admin %s: %s", admin_id, exc)
+    await notify_admins_new_payment(message.bot, payment, user)
+
+
+async def notify_admins_new_payment(bot, payment: Payment, user: User | None) -> list:
+    """Send the new-payment card to every admin (with approval buttons).
+
+    Delivery is delegated to ``bot.utils.admin_notify.send_to_admins``: Markdown
+    values are escaped, failures are logged at ERROR level, transient errors are
+    retried once and the message is resent as plain text if Telegram rejects the
+    formatting. Returns one result per admin so callers can report the outcome.
+    """
+    # Read the config lazily (like the other admin checks do) so a change to
+    # ADMIN_IDS is always honoured.
+    from config import ADMIN_IDS
+
+    if not ADMIN_IDS:
+        logger.error(
+            "ADMIN_IDS is empty — payment #%s cannot be sent to any admin",
+            payment.id,
+        )
+        return []
+    return await send_to_admins(
+        bot,
+        build_admin_payment_text(payment, user),
+        parse_mode="Markdown",
+        # Fallback body: same content, no formatting, so a Markdown problem
+        # degrades instead of losing the notification.
+        plain_text=build_admin_payment_text(payment, user, markdown=False),
+        reply_markup=admin_approval_keyboard(payment),
+    )
 
 
 @router.callback_query(F.data == "noop")

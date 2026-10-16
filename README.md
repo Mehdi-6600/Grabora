@@ -15,7 +15,8 @@
 - **Subscription tiers**: free / monthly / quarterly / yearly + optional 2K addon.
 - **Daily download limits** with automatic daily reset.
 - **Payments**: Telegram Stars (via `neonpay`, automatic activation) and card-to-card in IRR (manual admin approval).
-- **Admin tools**: `/stats`, `/broadcast`, `/ban`, `/unban`, `/give`, `/revoke`, `/payments`, `/pending`, `/card`, `/prices`, `/reject`.
+- **Admin panel**: `/admin` (alias `/panel`) opens a dedicated reply keyboard — stats, pending payments, prices, card details, broadcast and a notification self-test — so no command has to be remembered.
+- **Admin tools**: `/stats`, `/broadcast`, `/ban`, `/unban`, `/give`, `/revoke`, `/payments`, `/pending`, `/card`, `/prices`, `/reject`, `/test_alert`.
 - **Queue & throttling**: global concurrency 3, per-user 1, 1 msg/2s throttle.
 - **Scheduler**: temp-file cleanup, daily counter reset, subscription expiry checks & reminders.
 - **Logging**: rotating file handler (5 MB × 3 backups), domain-only URLs.
@@ -114,7 +115,8 @@ grabora/
 │   │   ├── download.py
 │   │   ├── card_payment.py
 │   │   ├── subscription.py
-│   │   └── admin.py
+│   │   ├── admin.py
+│   │   └── admin_panel.py
 │   ├── keyboards/
 │   │   ├── inline.py
 │   │   └── reply.py
@@ -123,6 +125,7 @@ grabora/
 │   │   └── throttling.py
 │   └── utils/
 │       ├── messages.py
+│       ├── admin_notify.py
 │       └── helpers.py
 ├── downloader/
 │   ├── __init__.py
@@ -257,12 +260,45 @@ Paid overseas users use Stars; Iranian users pay by card and an admin approves m
 | `/card` | Show the current card number and holder from `settings` |
 | `/card <number> \| <holder>` | Update the card details used in the instructions |
 | `/prices` | Show the current price of every package (IRR + Stars) |
-| `/prices <package> <irr> <stars>` | Change a package price at runtime, e.g. `/prices monthly 80000 80` |
+| `/prices <package> <irr> <stars>` | Change a package price at runtime, e.g. `/prices monthly 800000 80` |
 | `/reject <payment_id>` | Reject a pending payment and notify the user |
+| `/admin` (alias `/panel`) | Open the admin panel keyboard |
+| `/test_alert` | Send a test notification to every admin and report who was reachable |
 
 > Package keys are `monthly`, `quarterly`, `yearly` and `addon_2k`. Prices are stored in the database and read
 > live by both payment flows, so a change applies to the next invoice without a restart. Telegram Stars prices
 > must stay within the range neonpay accepts (1–2500); a value outside it is rejected with an explanation.
+
+### Admin panel
+
+Send `/admin` (or `/panel`) to get an admin-only reply keyboard. Nothing has to be typed afterwards:
+
+| Button | What it does |
+|---|---|
+| 📊 آمار | Bot statistics (`/stats`) |
+| 💳 پرداخت‌های در انتظار | Lists pending manual payments, each with its inline approval buttons (`/pending`) |
+| 💰 قیمت‌ها | Current price table for every package (`/prices`) |
+| 💳 شماره کارت | Current card number/holder (`/card`) |
+| 📢 پیام همگانی | Asks for the broadcast text (`/broadcast <text>`) |
+| 🔧 تست اطلاع‌رسانی | Sends a test message to every admin and reports per-admin success/failure |
+| ❌ خروج از پنل | Leaves the panel and restores the regular user keyboard |
+
+The panel lives in `bot/handlers/admin_panel.py`; its buttons call exactly the same functions as the slash
+commands, so the two can never drift apart. Non-admins get `این دستور فقط برای ادمین‌ها است.` instead of the panel.
+
+#### "The admin gets no notification" — troubleshooting
+
+Telegram only lets a bot message a user who has started a chat with it. If an admin has never pressed **/start**
+(or has blocked the bot), notifications to that admin fail with
+`Forbidden: bot can't initiate conversation with a user`.
+
+1. Make sure the admin presses `/start` once in the bot (then `/admin` → 🔧 تست اطلاع‌رسانی).
+2. `/test_alert` answers with one line per admin (`✅`/`❌`), the exact Telegram error and the fix to apply.
+3. Every delivery failure is logged at `ERROR` level with the same hint; a transient error (timeout, flood
+   control, Telegram 5xx) is retried once, and a message Telegram refuses to parse is resent as plain text, so
+   a formatting problem never costs the notification.
+4. If `ADMIN_IDS` is empty, the bot logs `ADMIN_IDS is empty — no admin can be notified` and `/test_alert`
+   says so explicitly.
 
 ## Deployment (systemd)
 

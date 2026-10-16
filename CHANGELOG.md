@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### Added
+- **Independent admin panel** (`/admin`, alias `/panel`): a dedicated reply keyboard (`📊 آمار`,
+  `💳 پرداخت‌های در انتظار`, `💰 قیمت‌ها`, `💳 شماره کارت`, `📢 پیام همگانی`, `🔧 تست اطلاع‌رسانی`,
+  `❌ خروج از پنل`) handled by the new `bot/handlers/admin_panel.py` router. Every button reuses the exact body
+  of its slash command, pending payments keep their inline approval buttons, and the exit button restores the
+  user keyboard. Non-admins receive `ADMIN_ONLY` instead of reaching the panel.
+- **`/test_alert`** (`🔧 تست اطلاع‌رسانی`): sends a test notification to every admin and reports per-admin
+  success/failure plus the fix when one is unreachable.
+- `bot/utils/admin_notify.py`: one delivery path (`send_to_admins`) for all admin notifications, with Markdown
+  escaping, one retry for transient errors, a plain-text fallback, and a per-admin result object.
 - **Runtime-configurable prices**: a new `prices` table (`package_key`, `price_irr`, `price_stars`, `updated_at`)
   seeds the `config.PACKAGE_PRICES_IRR` / `PACKAGE_PRICES_STARS` defaults on first start with `INSERT OR IGNORE`,
   so admin edits are never overwritten on restart.
@@ -23,6 +32,15 @@
   defaults.
 
 ### Fixed
+- **Admin notifications for card payments could be lost silently**: the payment card is sent with
+  `parse_mode="Markdown"` and embedded the payer's name and username unescaped, so a single unbalanced `_`, `*`
+  or backtick (`Ali_Reza` + `ali_reza_72x` is enough) made Telegram reject the whole message with
+  "can't parse entities" — the admin simply never saw the payment. User-controlled values are now escaped, the
+  message is resent as plain text if formatting is still rejected, transient errors are retried once, and every
+  failure is logged at `ERROR` level (previously: a `WARNING` with no hint).
+- Cards payments and Stars payments now share that delivery path, so the Stars admin notice can no longer be
+  swallowed by a `logger.debug` call.
+- The "pending payments" empty state is now `هیچ پرداخت در انتظاری نیست.`
 - **Reply-keyboard buttons work**: `اشتراک`, `راهنما`, `👤 حساب من` and `🚀 دانلود` are plain-text messages, not
   commands, and previously matched no handler (only the slash commands worked). The button labels now live in
   `bot/keyboards/reply.py` as `BTN_*` constants that are used both to build the keyboard and to match incoming
