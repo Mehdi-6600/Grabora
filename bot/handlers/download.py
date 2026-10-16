@@ -29,8 +29,10 @@ from bot.utils.messages import (
     DOWNLOAD_FAILED,
     FILE_TOO_LARGE,
     GENERIC_ERROR,
+    INSTAGRAM_RATE_LIMITED,
     PLAYLIST_NOTICE,
     PROCESSING,
+    RATE_LIMITED,
     UPGRADE_FOR_QUALITY,
     UPGRADE_FOR_SIZE,
     URL_NOT_FOUND,
@@ -47,8 +49,9 @@ from database.queries import (
     log_download,
 )
 from downloader.queue import download_queue
+from downloader.ytdlp_wrapper import MediaTooLargeError
 from downloader.ytdlp_wrapper import download as download_media
-from downloader.ytdlp_wrapper import extract_info
+from downloader.ytdlp_wrapper import extract_info, is_instagram_url, is_rate_limited, supports_size_probe
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +125,34 @@ async def _probe_size_mb(url: str) -> float | None:
         logger.debug("Size probe failed for %s: %s", url, exc)
         return None
     return _estimate_size_mb(info)
+
+
+def _failure_message(exc: BaseException, url: str, user: User) -> str:
+    """User-facing text for a failed download — never any internal detail."""
+    if isinstance(exc, MediaTooLargeError):
+        # Same wording as the post-download size rejection, so a free user is
+        # still told about the subscription option (no size is known here).
+        return _decision_message(AccessResult.SIZE_LIMIT_REACHED, user, None)
+    if is_rate_limited(exc):
+        # Instagram's own rate limit deserves its own wording; both messages
+        # stay free of stack traces, headers and credentials.
+        return INSTAGRAM_RATE_LIMITED if is_instagram_url(url) else RATE_LIMITED
+    return DOWNLOAD_FAILED
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Whether the single retry in the download flow may be spent on ``exc``.
+
+    A rate limit (HTTP 429) is not transient on a seconds timescale and every
+    retry is another request against the limit that is being enforced, so it is
+    never retried here — yt-dlp already retries *media* transfers with bounded
+    backoff, and the user is told to come back later. A media that yt-dlp
+    refused for exceeding ``max_filesize`` is retried no more than a locked
+    quality would be. Everything else keeps the pre-existing behaviour.
+    """
+    if isinstance(exc, MediaTooLargeError) or is_rate_limited(exc):
+        return False
+    return True
 
 
 def _is_limit_reached(user: User):
@@ -223,8 +254,20 @@ async def on_quality_selected(callback: CallbackQuery, state: FSMContext, db_use
     try:
         # Gate 2: size estimate from metadata, before downloading anything.
         # Unknown (None or 0) estimates skip this gate entirely; Gate 3 below
-        # always runs on the real file.
-        estimated_mb = await _probe_size_mb(url)
+        # always runs on the real file. Sites where the probe costs an extra
+        # rate-limited request (Instagram) skip it and rely on yt-dlp's
+        # max_filesize abort plus Gate 3 instead.
+        limit_bytes = file_size_limit_mb(db_user) * 1024 * 1024
+        probe = supports_size_probe(url)
+        if not probe:
+            logger.info(
+                "Skipping the metadata size probe for %s (saves one request); "
+                "yt-dlp will abort media larger than %d MB and the real file is "
+                "checked after download",
+                domain_of(url),
+                file_size_limit_mb(db_user),
+            )
+        estimated_mb = await _probe_size_mb(url) if probe else None
         if estimated_mb is not None and estimated_mb > 0:
             decision = await check_download_access(
                 db_user, media_type, quality, estimated_size_mb=estimated_mb
@@ -245,21 +288,33 @@ async def on_quality_selected(callback: CallbackQuery, state: FSMContext, db_use
                     )
                 return
 
-        # Retry once on transient failure.
+        # Retry once on transient failure. Rate limits and "too large" are
+        # final: retrying them would only add requests against a limit that is
+        # already being enforced (verified cause of repeated 429s).
         last_exc: Exception | None = None
         for attempt in range(2):
             try:
                 file_path = await download_queue.run(
                     db_user.user_id,
-                    lambda u=url, q=quality, m=media_type, d=temp_dir: download_media(u, q, m, d),
+                    lambda u=url, q=quality, m=media_type, d=temp_dir, mb=limit_bytes: download_media(
+                        u, q, m, d, max_filesize_bytes=mb
+                    ),
                 )
                 last_exc = None
                 break
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                logger.warning("Download attempt %d failed: %s", attempt + 1, exc)
-                if attempt == 0:
+                logger.warning(
+                    "Download attempt %d/%d failed for %s (%s): %s",
+                    attempt + 1,
+                    2,
+                    domain_of(url),
+                    type(exc).__name__,
+                    exc,
+                )
+                if attempt == 0 and _is_retryable(exc):
                     continue
+                break
         if last_exc is not None:
             raise last_exc
 
@@ -306,7 +361,9 @@ async def on_quality_selected(callback: CallbackQuery, state: FSMContext, db_use
         )
         await increment_daily_downloads(db_user.user_id)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Download flow error: %s", exc)
+        logger.exception(
+            "Download flow error for %s (%s): %s", domain_of(url), type(exc).__name__, exc
+        )
         await log_download(
             user_id=db_user.user_id,
             url_domain=domain_of(url),
@@ -316,7 +373,15 @@ async def on_quality_selected(callback: CallbackQuery, state: FSMContext, db_use
             error_message=str(exc)[:500],
         )
         if callback.message is not None:
-            await callback.message.answer(DOWNLOAD_FAILED)
+            await callback.message.answer(_failure_message(exc, url, db_user))
+        # A rate limit is worth telling the admins about: it usually means
+        # several users are affected at once.
+        if is_rate_limited(exc):
+            logger.warning(
+                "Rate limit (HTTP 429) while downloading from %s — see the "
+                "INSTAGRAM_COOKIES_* documentation if this repeats",
+                domain_of(url),
+            )
         await _notify_admins_if_needed(callback.bot)
     finally:
         if file_path is not None:

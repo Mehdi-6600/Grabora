@@ -63,6 +63,16 @@ CARD_HOLDER: Final[str] = _get_str("CARD_HOLDER")
 YOUTUBE_COOKIES_B64: Final[str] = _get_str("YOUTUBE_COOKIES_B64")
 YOUTUBE_COOKIES_FILE: Final[str] = _get_str("YOUTUBE_COOKIES_FILE", "/tmp/cookies.txt")
 
+# Instagram cookies (optional). Instagram rate-limits anonymous post access
+# (HTTP 429 / login redirect) on datacenter IPs such as Render's. A logged-in
+# session uses a different extraction path. Base64 of a Netscape cookies.txt
+# exported from a browser that is logged in to Instagram. Leave empty to keep
+# anonymous access; nothing else changes when it is unset.
+INSTAGRAM_COOKIES_B64: Final[str] = _get_str("INSTAGRAM_COOKIES_B64")
+INSTAGRAM_COOKIES_FILE: Final[str] = _get_str(
+    "INSTAGRAM_COOKIES_FILE", "/tmp/instagram_cookies.txt"
+)
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------

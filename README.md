@@ -185,6 +185,8 @@ Set `BOT_API_URL=http://localhost:8081` in `.env` and run a local Bot API server
 | `CARD_HOLDER` | — | Card holder name shown to users (editable via `/card`) |
 | `YOUTUBE_COOKIES_B64` | — | Base64-encoded `cookies.txt` for YouTube (required on cloud/datacenter IPs such as Render) |
 | `YOUTUBE_COOKIES_FILE` | `/tmp/cookies.txt` | Where the decoded cookies file is written at startup |
+| `INSTAGRAM_COOKIES_B64` | — | Optional: base64-encoded Instagram `cookies.txt`, used only for `instagram.com` links |
+| `INSTAGRAM_COOKIES_FILE` | `/tmp/instagram_cookies.txt` | Where the decoded Instagram cookies file is written |
 | `LOG_LEVEL` | `INFO` | Logging level |
 | `LOG_FILE` | `logs/grabora.log` | Log file path |
 | `CLEANUP_INTERVAL_HOURS` | `1` | Temp cleanup interval |
@@ -233,6 +235,68 @@ and, if YouTube still answers with a bot check, retries with the next client set
 before giving up. When cookies *are* configured the yt-dlp defaults are tried first
 (they expose the most formats) and the client ladder is used only as a fallback.
 Client names the installed yt-dlp build does not support are skipped automatically.
+
+## Instagram rate limits (HTTP 429)
+
+Instagram limits **anonymous** post access from datacenter IPs (Render, Railway,
+most VPS providers). When the limit is hit, `yt-dlp` reports:
+
+```
+[Instagram] Deh-k7ntiAL: Unable to download webpage: HTTP Error 429: Too Many Requests
+```
+
+What the bot does about it:
+
+* the extra metadata request that used to run before every Instagram download is
+  skipped, so one download costs Instagram **one** request instead of two. The
+  size limit is still enforced — `yt-dlp` gets `max_filesize` for the user's tier
+  (so oversized media is aborted before it is written) and the real file is
+  checked after the download exactly as before;
+* a 429 is **never retried**. (Retrying a rate limit immediately is what turns one
+  throttled request into several, and it can extend the limit.) Other failures
+  keep their previous single retry;
+* the user gets a clear Persian message that Instagram has temporarily limited
+  the bot's requests and to try again later. No stack trace, URL parameters,
+  header or cookie is ever shown to a user;
+* yt-dlp's own warnings/errors (including its rate-limit notice) are now written
+  to the log, so `LOG_LEVEL=INFO` shows why a download failed.
+
+Waiting is often enough: Instagram's anonymous rate limit is usually measured in
+minutes to a few hours. If it becomes permanent, the limit is applied to the
+server's IP address, and the only thing that changes that is a different
+outbound IP (for example running the bot locally, or on a residential
+connection). Nothing here can bypass an IP-level limit, and no paid service is
+needed or recommended.
+
+### Optional: Instagram cookies
+
+A **logged-in** Instagram session uses a different extraction path than anonymous
+access, which is why `INSTAGRAM_COOKIES_B64` is often enough to make downloads
+work again on a datacenter IP.
+
+1. In a browser where you are logged into Instagram, install a `cookies.txt`
+   exporter extension (for example *Get cookies.txt LOCALLY* for Chrome/Firefox).
+2. Open `https://www.instagram.com` while signed in and export the cookies in
+   **Netscape** format as `instagram_cookies.txt`.
+3. Base64-encode it: `base64 -w0 instagram_cookies.txt`
+4. Set the result as `INSTAGRAM_COOKIES_B64` in `.env` (or in the Render dashboard
+   under *Environment*).
+
+Rules that this option follows:
+
+* it is **optional** — when it is unset, Instagram downloads keep using anonymous
+  access and **every other website is completely unaffected**. It is never applied
+  to a non-Instagram URL;
+* the value is never logged and never committed. It is decoded to
+  `INSTAGRAM_COOKIES_FILE` (default `/tmp/instagram_cookies.txt`) with `0600`
+  permissions, and an invalid value only logs an error — downloads still run;
+* **do not send your Instagram password to the bot.** There is no login flow and
+  no password handling anywhere in the code — the cookies are the only thing you
+  paste, and you paste them into your own hosting provider's secret settings;
+* cookies do **not** raise an IP-level limit. If Instagram rejects the server's IP
+  regardless of cookies, downloads stay limited until the bot runs from a
+  different IP. Treat the value as a secret and re-export it if the session ends
+  (logging out of that browser invalidates it).
 
 ## Payments
 
@@ -349,6 +413,7 @@ https://<your-service>.onrender.com/health
 - **512 MB RAM** — enough for the bot, but 1080p downloads may OOM.
 - **Sleeps after 15 min idle**, cold start ~30 s (UptimeRobot prevents this).
 - **Ephemeral filesystem**: `grabora.db` and `tmp/` are wiped on restart. For persistence, attach a Render persistent disk (paid).
+- **Instagram limits anonymous post access from Render's datacenter IPs** (HTTP 429). See [Instagram rate limits (HTTP 429)](#instagram-rate-limits-http-429); the metadata probe is already skipped for Instagram and optional `INSTAGRAM_COOKIES_B64` changes the extraction path.
 - **YouTube blocks Render's datacenter IPs** (`Sign in to confirm you're not a bot`). Set `YOUTUBE_COOKIES_B64` — see [YouTube cookies (cloud hosting)](#youtube-cookies-cloud-hosting). Note that a persistent disk is not needed for the cookies file: it is re-created from the environment variable on every start.
 
 ## Testing
