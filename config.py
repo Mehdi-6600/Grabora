@@ -108,17 +108,17 @@ TIER_DURATIONS_DAYS: Final[dict[str, int]] = {
 # database.queries.get_price() / get_all_prices() — do not read these dicts
 # from handlers. Keys: monthly | quarterly | yearly | addon_2k
 PACKAGE_PRICES_IRR: Final[dict[str, int]] = {
-    "monthly": 50_000,
-    "quarterly": 120_000,
-    "yearly": 400_000,
-    "addon_2k": 30_000,
+    "monthly": 800_000,  # 80,000 تومان
+    "quarterly": 2_100_000,  # 210,000 تومان
+    "yearly": 7_200_000,  # 720,000 تومان
+    "addon_2k": 500_000,  # 50,000 تومان
 }
 
 PACKAGE_PRICES_STARS: Final[dict[str, int]] = {
-    "monthly": 50,
-    "quarterly": 120,
-    "yearly": 400,
-    "addon_2k": 30,
+    "monthly": 80,
+    "quarterly": 210,
+    "yearly": 720,
+    "addon_2k": 50,
 }
 
 # 2K (1440p) addon validity in days — its price lives in PACKAGE_PRICES_*["addon_2k"].
